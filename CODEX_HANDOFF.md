@@ -3,13 +3,15 @@
 Copy everything between the markers into Codex. It is self-contained.
 
 <!-- CODEX-PROMPT-START -->
-You are continuing SAVAGE AI, a provider-independent AI connection system. Work in the existing
-workspace and preserve its visual design and security invariants.
+You are continuing SAVAGE AI, a provider-independent AI connection system. Clone the repository
+and preserve its visual design and security invariants.
 
 CONTEXT
-- Workspace: /workspace/chats/174eb48b615d40af2fb498a5
-- Branch: freebuff/174eb48b615d40af2fb498a5
-- Base commit: f1b6301 ("Add provider-independent SAVAGE AI stack with encrypted credential vault")
+- Repository (private): https://github.com/gratefulsavage11ish/savage-ai
+- Clone: `git clone https://github.com/gratefulsavage11ish/savage-ai.git`
+- Branch: freebuff/174eb48b615d40af2fb498a5 (repository default branch)
+- Base commits: f1b6301 ("Add provider-independent SAVAGE AI stack with encrypted credential vault")
+  and d0cf0a5 (Codex handoff prompt); run `git log` for the latest.
 - Runtime: Node.js 26, ESM, zero dependencies, no build step.
 - Read first: HANDOFF.md, README.md, src/provider-registry.js, src/chat-service.js,
   src/adapters/openai-compatible.js, src/endpoint-policy.js, server.mjs, tests/proxy.test.js.
@@ -54,6 +56,6 @@ PRIORITIES, IN ORDER
 6. Add tests for every new behavior; keep `npm test` and syntax checks passing.
 
 CURRENT LIMITATION
-The branch is not pushed to a remote yet (GitHub device authorization was still pending). Do not
-invent a remote or credentials. If the repository is available, base work on the commit above.
+The repository is private; authenticate with GitHub before cloning. No provider credentials are
+configured, so live provider calls are untested until keys are added through the server vault.
 <!-- CODEX-PROMPT-END -->

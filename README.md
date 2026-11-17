@@ -3,6 +3,8 @@
 Vanilla HTML/CSS/JS frontend plus a dependency-free Node development server.
 No framework, no build step, no npm install required.
 
+Repository: https://github.com/gratefulsavage11ish/savage-ai (public).
+
 ## Architecture
 
 ```
@@ -86,7 +88,7 @@ falls back to `LocalCredentialStore`, which is explicitly marked insecure.
 ## Tests
 
 ```sh
-npm test        # 34 tests, no network or real keys required
+npm test        # 35 tests, no network or real keys required
 npm run check   # syntax checks + the same tests
 ```
 

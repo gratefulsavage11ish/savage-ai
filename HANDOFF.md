@@ -5,7 +5,7 @@ Shared context for anyone continuing this build. Keep this file in sync with the
 ## Workspace
 
 - Path: `/workspace/chats/174eb48b615d40af2fb498a5`
-- Repository: https://github.com/gratefulsavage11ish/savage-ai (private)
+- Repository: https://github.com/gratefulsavage11ish/savage-ai (public)
 - Branch: `freebuff/174eb48b615d40af2fb498a5` (repository default branch)
 - Runtime: Node.js 26 (ESM, no dependencies, no build step)
 - Files: `index.html`, `styles.css`, `app.js`, `server.mjs`, `src/`, `tests/`, `package.json`, `README.md`

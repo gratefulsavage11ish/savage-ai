@@ -7,7 +7,7 @@ You are continuing SAVAGE AI, a provider-independent AI connection system. Clone
 and preserve its visual design and security invariants.
 
 CONTEXT
-- Repository (private): https://github.com/gratefulsavage11ish/savage-ai
+- Repository (public): https://github.com/gratefulsavage11ish/savage-ai
 - Clone: `git clone https://github.com/gratefulsavage11ish/savage-ai.git`
 - Branch: freebuff/174eb48b615d40af2fb498a5 (repository default branch)
 - Base commits: f1b6301 ("Add provider-independent SAVAGE AI stack with encrypted credential vault")
@@ -44,18 +44,13 @@ INVARIANTS — DO NOT BREAK
 5. Keep the adapter interface and registry extensible; new providers register an adapter.
 6. Do not claim verification you did not run.
 
-PRIORITIES, IN ORDER
-1. Authentication and per-user credential isolation: user accounts, per-user vault namespaces,
-   per-user rate limits, authorization checks on every credential and proxy route.
-2. Replace the development file vault with KMS-backed envelope encryption and an encrypted
-   database; add key rotation.
-3. CSRF tokens and audit retention/alerting; expand audit fields without logging secrets.
-4. DNS pinning / egress proxy to close the SSRF rebinding TOCTOU, keeping tests green.
-5. Real provider configuration and live verification once credentials are available (Hugging Face
-   router model `openai/gpt-oss-120b`, Venice, an allowlisted OpenAI-compatible endpoint).
-6. Add tests for every new behavior; keep `npm test` and syntax checks passing.
+WORKING RULES
+- Use only the requirements and milestones stated in the originating chat; do not infer a roadmap
+  from this handoff document.
+- Preserve the invariants above and keep `npm test` and the syntax checks passing.
+- Do not add production-hardening scope or features the chat did not request.
 
 CURRENT LIMITATION
-The repository is private; authenticate with GitHub before cloning. No provider credentials are
-configured, so live provider calls are untested until keys are added through the server vault.
+No provider credentials are configured, so live provider calls are untested until keys are added
+through the server vault.
 <!-- CODEX-PROMPT-END -->

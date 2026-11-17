@@ -30,7 +30,7 @@ export class OpenAICompatibleAdapter {
     if (!config.model) throw new NormalizedError({ category: 'invalid_request', providerId: config.id, message: 'No model selected for this provider.' });
     const stream = Boolean(options.stream && this.supportsStreaming);
     const body = { model: config.model, messages, stream, ...(options.temperature != null ? { temperature: options.temperature } : {}), ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}) };
-    const { res, latencyMs } = await timedFetch(joinUrl(this.baseUrl(config), 'chat/completions'), { method: 'POST', headers: this.headers(config), body: JSON.stringify(body), timeoutMs: options.timeoutMs || config.timeoutMs, fetchImpl: config.fetchImpl });
+    const { res, latencyMs } = await timedFetch(joinUrl(this.baseUrl(config), 'chat/completions'), { method: 'POST', headers: this.headers(config), body: JSON.stringify(body), timeoutMs: options.timeoutMs || config.timeoutMs, fetchImpl: config.fetchImpl, signal: options.signal });
     if (!res.ok) { const b = await parseJsonSafe(res); throw normalizeHttpStatus(res.status, { providerId: config.id, model: config.model, body: b }); }
     if (stream && res.body) return this._consumeStream(config, res, latencyMs, options);
     const json = await parseJsonSafe(res);
@@ -45,14 +45,48 @@ export class OpenAICompatibleAdapter {
     return successResult({ providerId: config.id, model: config.model, responseText: text, usage, latencyMs, cost: computeCost(usage, config.pricing), requestId: json?.id || res.headers?.get?.('x-request-id') || null });
   }
   async _consumeStream(config, res, latencyMs, options) {
-    const reader = res.body.getReader(); const decoder = new TextDecoder(); let buffer = '', text = '', usage = null, requestId = null;
-    for (;;) {
-      const { done, value } = await reader.read(); if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      for (let i; buffer.indexOf('\n') >= 0;) { const line = buffer.slice(0, buffer.indexOf('\n')).trim(); buffer = buffer.slice(buffer.indexOf('\n') + 1); if (!line.startsWith('data:')) continue; const data = line.slice(5).trim(); if (data === '[DONE]') break; try { const j = JSON.parse(data); requestId ||= j.id; usage = normalizeUsage(j.usage) || usage; const delta = j.choices?.[0]?.delta?.content || j.choices?.[0]?.text || ''; if (delta) { text += delta; options.onToken?.(delta, text); } } catch {} }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const idleMs = options.timeoutMs || config.timeoutMs || 60000;
+    let buffer = '', text = '', usage = null, requestId = null, finished = false;
+    try {
+      while (!finished) {
+        const { done, value } = await readWithIdle(reader, idleMs);
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        while (buffer.includes('\n')) {
+          const index = buffer.indexOf('\n');
+          const line = buffer.slice(0, index).trim();
+          buffer = buffer.slice(index + 1);
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') { finished = true; break; }
+          let event;
+          try { event = JSON.parse(data); } catch { continue; }
+          if (event?.error) throw new NormalizedError({ category: 'server_error', providerId: config.id, model: config.model, message: event.error.message || 'Provider reported a streaming error.' });
+          requestId ||= event.id;
+          usage = normalizeUsage(event.usage) || usage;
+          const delta = event.choices?.[0]?.delta?.content || event.choices?.[0]?.text || '';
+          if (delta) { text += delta; options.onToken?.(delta, text); }
+        }
+      }
+      try { await reader.cancel(); } catch { /* stream already closed */ }
+      return successResult({ providerId: config.id, model: config.model, responseText: text, usage, latencyMs, cost: computeCost(usage, config.pricing), requestId, streamed: true });
+    } catch (error) {
+      try { await reader.cancel(); } catch { /* already closed */ }
+      if (options.signal?.aborted) throw Object.assign(new NormalizedError({ category: 'timeout', retryable: false, message: 'Request was cancelled.' }), { latencyMs });
+      if (error instanceof NormalizedError) throw Object.assign(error, { latencyMs });
+      throw Object.assign(new NormalizedError({ category: 'connection_error', providerId: config.id, model: config.model, retryable: true, message: `Streaming connection failed: ${error?.message || 'connection lost'}` }), { latencyMs });
     }
-    return successResult({ providerId: config.id, model: config.model, responseText: text, usage, latencyMs, cost: computeCost(usage, config.pricing), requestId, streamed: true });
   }
   normalizeError(error) { return error instanceof NormalizedError ? error : new NormalizedError({ category: 'unknown_error', message: error?.message || String(error) }); }
 }
+function readWithIdle(reader, idleMs) {
+  let timer;
+  const idle = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new NormalizedError({ category: 'timeout', retryable: true, message: `Stream idle for ${idleMs}ms — the provider stopped sending data.` })), idleMs);
+  });
+  return Promise.race([reader.read(), idle]).finally(() => clearTimeout(timer));
+}
+
 export class CustomOpenAICompatibleAdapter extends OpenAICompatibleAdapter { id = 'custom-openai'; label = 'Custom OpenAI-compatible'; constructor() { super({ name: 'Custom provider' }); } }

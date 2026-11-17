@@ -264,28 +264,36 @@ export function createSavageServer({
     const messages = sanitizeMessages(body.messages);
     const options = sanitizeOptions(body.options);
     const started = Date.now();
+    // Stop upstream work if the browser cancels the request.
+    const controller = new AbortController();
+    const onClose = () => { if (!res.writableEnded) controller.abort(); };
+    res.on('close', onClose);
     if (options.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.flushHeaders?.();
       try {
-        const result = await service.send(provider, messages, { ...options, onToken: (delta, full) => sseWrite(res, { type: 'token', text: delta, full }) });
+        const result = await service.send(provider, messages, { ...options, signal: controller.signal, onToken: (delta, full) => { if (!res.writableEnded) sseWrite(res, { type: 'token', text: delta, full }); } });
         await audit.record({ ...auditBase, outcome: 'ok', latencyMs: result.latencyMs, usage: result.usage, cost: result.cost, requestId: result.requestId, streamed: true });
         sseWrite(res, { type: 'done', result });
       } catch (err) {
         const n = asNormalized(err);
         await audit.record({ ...auditBase, outcome: 'error', category: n.category, latencyMs: Date.now() - started, streamed: true });
-        sseWrite(res, { type: 'error', error: n.toJSON() });
+        if (!res.writableEnded) sseWrite(res, { type: 'error', error: n.toJSON() });
+      } finally {
+        res.off('close', onClose);
       }
       return res.end();
     }
     try {
-      const result = await service.send(provider, messages, options);
+      const result = await service.send(provider, messages, { ...options, signal: controller.signal });
       await audit.record({ ...auditBase, outcome: 'ok', latencyMs: result.latencyMs, usage: result.usage, cost: result.cost, requestId: result.requestId });
       return sendJson(res, 200, { ok: true, result });
     } catch (err) {
       const n = asNormalized(err);
       await audit.record({ ...auditBase, outcome: 'error', category: n.category, latencyMs: Date.now() - started });
       throw n;
+    } finally {
+      res.off('close', onClose);
     }
   }
 

@@ -15,7 +15,7 @@ CONTEXT
 - Runtime: Node.js 26, ESM, zero dependencies, no build step.
 - Read first: HANDOFF.md, README.md, src/provider-registry.js, src/chat-service.js,
   src/adapters/openai-compatible.js, src/endpoint-policy.js, server.mjs, tests/proxy.test.js.
-- Run: `npm test` (35/35 passing), `npm run check`, `node server.mjs` (PORT 3001).
+- Run: `npm test` (39/39 passing), `npm run check`, `node server.mjs` (PORT 3001).
 - Persistence requires `SAVAGE_CREDENTIAL_KEY="$(openssl rand -hex 32)"`; without it the server
   uses a non-persistent in-memory vault. Provider hosts beyond Hugging Face/Venice must be added
   to `SAVAGE_ALLOWED_HOSTS`. `SAVAGE_ALLOW_LOCAL=0` disables loopback endpoints.

@@ -13,6 +13,7 @@ const LS_P = 'savage.providers', LS_A = 'savage.active';
 let providers = load();
 let activeId = localStorage.getItem(LS_A) || providers.find(p => p.enabled)?.id || null;
 let history = [], streaming = false, editingId = null, proxyMode = false, store = null;
+let activeAbort = null;
 const metrics = {};
 
 async function detectBackend() {
@@ -66,7 +67,7 @@ async function proxyCall(provider, action, body = {}) {
   return payload.result;
 }
 async function proxyChat(provider, messages, options = {}) {
-  const res = await fetch(`/api/proxy/${encodeURIComponent(provider.id)}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: publicProvider(provider), messages, options: { stream: Boolean(options.stream), temperature: options.temperature, maxTokens: options.maxTokens } }) });
+  const res = await fetch(`/api/proxy/${encodeURIComponent(provider.id)}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: options.signal, body: JSON.stringify({ provider: publicProvider(provider), messages, options: { stream: Boolean(options.stream), temperature: options.temperature, maxTokens: options.maxTokens } }) });
   if (!res.ok) throw await proxyError(res);
   if (!String(res.headers.get('content-type') || '').includes('text/event-stream')) {
     const payload = await res.json();
@@ -276,6 +277,7 @@ function renderEvaluation() {
   $('#stAvail').textContent = `${summary.successRate}%`;
   $('#stSpend').textContent = `$${summary.totalCost}`;
   $('#stRefusals').textContent = `${summary.refusals} (${summary.refusalRate}%)`;
+  renderHealthChart(summary);
   const activity = $('#activity');
   activity.innerHTML = '';
   if (!telemetry.events.length) { activity.innerHTML = '<div class="event">No activity yet. Real requests appear here.</div>'; return; }
@@ -321,10 +323,14 @@ async function sendChat(rawText) {
   history.push({ role: 'user', content: text });
   addMessage('user', text);
   const sendButton = $('#sendBtn');
+  const stopButton = $('#stopBtn');
+  const controller = new AbortController();
+  activeAbort = controller;
+  stopButton.hidden = false; stopButton.disabled = false;
   sendButton.disabled = true; sendButton.textContent = 'Sending…';
   const pending = addMessage('assistant', streaming ? '' : 'Contacting provider…');
   try {
-    const result = await runChat(provider, history, { stream: streaming, onToken: (delta, full) => setPendingText(pending, full) });
+    const result = await runChat(provider, history, { stream: streaming, signal: controller.signal, onToken: (delta, full) => setPendingText(pending, full) });
     setPendingText(pending, result.responseText || '(empty response)');
     const meta = document.createElement('div');
     meta.className = 'meta';
@@ -335,6 +341,11 @@ async function sendChat(rawText) {
     recordClientTelemetry(result, provider);
     renderProviders();
   } catch (error) {
+    if (controller.signal.aborted) {
+      pending.remove();
+      addMessage('assistant', 'Stopped by you. Provider and model kept as selected — nothing was switched.');
+      return;
+    }
     const normalized = error instanceof NormalizedError ? error : normalizedFrom(error);
     pending.remove();
     addMessage('assistant', `⚠ ${CATEGORY_LABELS[normalized.category] || normalized.category}: ${normalized.message}\nProvider and model were kept as selected — nothing was switched.`, '', {
@@ -345,9 +356,42 @@ async function sendChat(rawText) {
     });
     recordClientTelemetry(null, provider, normalized);
   } finally {
+    activeAbort = null;
+    stopButton.hidden = true; stopButton.disabled = false;
     sendButton.disabled = false; sendButton.textContent = 'Send';
+    stopButton.textContent = 'Stop';
     renderEvaluation();
   }
+}
+
+function renderHealthChart(summary) {
+  const chart = $('#healthChart');
+  chart.innerHTML = '';
+  const entries = Object.entries(summary.byProvider);
+  if (!entries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'No provider health data yet. Real requests appear here.';
+    chart.append(empty);
+    return;
+  }
+  entries.sort((a, b) => b[1].length - a[1].length).forEach(([providerId, events]) => {
+    const ok = events.filter(event => event.ok).length;
+    const rate = events.length ? Math.round((ok / events.length) * 100) : 100;
+    const avg = events.length ? Math.round(events.reduce((sum, event) => sum + (event.latencyMs || 0), 0) / events.length) : 0;
+    const row = document.createElement('div');
+    row.className = 'health-row';
+    const head = document.createElement('div');
+    head.className = 'health-head';
+    const name = document.createElement('span'); name.textContent = providerId;
+    const stat = document.createElement('span'); stat.textContent = `${rate}% · ${avg}ms · ${events.length} req`;
+    head.append(name, stat);
+    const bar = document.createElement('div'); bar.className = 'health-bar';
+    const fill = document.createElement('div'); fill.className = 'health-fill'; fill.style.width = `${rate}%`;
+    bar.append(fill);
+    row.append(head, bar);
+    chart.append(row);
+  });
 }
 
 // ---------- Provider modal ----------
@@ -435,6 +479,7 @@ document.querySelectorAll('nav button').forEach(button => button.addEventListene
   renderEvaluation();
 }));
 $('#clearTelemetry').addEventListener('click', () => { telemetry.clear(); renderEvaluation(); toast('Local telemetry cleared'); });
+$('#stopBtn').addEventListener('click', () => { const button = $('#stopBtn'); button.disabled = true; button.textContent = 'Stopping…'; activeAbort?.abort(); });
 $('#chatForm').addEventListener('submit', (event) => { event.preventDefault(); const input = $('#chatInput'); const text = input.value; input.value = ''; sendChat(text); });
 $('#chatInput').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chatForm').requestSubmit(); }

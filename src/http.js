@@ -1,14 +1,17 @@
 import { NormalizedError } from './errors.js';
 // Timed fetch with timeout. Never retries silently — caller decides.
-export async function timedFetch(url, { timeoutMs = 30000, fetchImpl = globalThis.fetch, ...init } = {}) {
+export async function timedFetch(url, { timeoutMs = 30000, fetchImpl = globalThis.fetch, signal: externalSignal, ...init } = {}) {
   if (typeof fetchImpl !== 'function') throw new NormalizedError({ category: 'connection_error', message: 'fetch is not available in this environment.' });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = externalSignal && typeof AbortSignal.any === 'function'
+    ? AbortSignal.any([controller.signal, externalSignal])
+    : controller.signal;
   const started = performance.now();
   try {
     // Redirects are never followed: an allowlisted host must not be able to
     // bounce the request to an internal address (SSRF protection).
-    const res = await fetchImpl(url, { ...init, redirect: 'manual', signal: controller.signal });
+    const res = await fetchImpl(url, { ...init, redirect: 'manual', signal });
     const latency = Math.round(performance.now() - started);
     if (res.status >= 300 && res.status < 400) {
       throw Object.assign(new NormalizedError({ category: 'invalid_request', status: res.status, message: `Provider returned an unexpected redirect (HTTP ${res.status}). Redirects are refused for safety.` }), { latencyMs: latency });
@@ -17,6 +20,7 @@ export async function timedFetch(url, { timeoutMs = 30000, fetchImpl = globalThi
   } catch (e) {
     const latencyMs = Math.round(performance.now() - started);
     if (e instanceof NormalizedError) throw Object.assign(e, { latencyMs });
+    if (externalSignal?.aborted) throw Object.assign(new NormalizedError({ category: 'timeout', retryable: false, message: 'Request was cancelled.' }), { latencyMs });
     if (e?.name === 'AbortError') throw Object.assign(new NormalizedError({ category: 'timeout', retryable: true, message: `Request timed out after ${timeoutMs}ms.` }), { latencyMs });
     throw Object.assign(new NormalizedError({ category: 'connection_error', retryable: true, message: `Connection error: ${e?.message || 'network failure'}` }), { latencyMs });
   } finally { clearTimeout(timer); }

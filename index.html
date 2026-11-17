@@ -9,7 +9,7 @@
    <header class="topbar"><div><h1>Chat</h1><p id="chatSub">Select a provider — SAVAGE never switches providers or models automatically.</p></div>
    <div class="chat-controls"><select id="providerSelect" aria-label="Provider"></select><input id="modelInput" placeholder="Model id" aria-label="Model"><button id="streamToggle" class="btn ghost" aria-pressed="false">Streaming: off</button></div></header>
    <div id="messages" class="messages"><div class="empty">Send a message through the selected provider. Errors are shown as-is — no silent fallback.</div></div>
-   <form id="chatForm" class="composer"><textarea id="chatInput" rows="2" placeholder="Message… (Enter to send)" required></textarea><button class="btn primary" id="sendBtn">Send</button></form>
+   <form id="chatForm" class="composer"><textarea id="chatInput" rows="2" placeholder="Message… (Enter to send)" required></textarea><button class="btn ghost" type="button" id="stopBtn" hidden>Stop</button><button class="btn primary" id="sendBtn">Send</button></form>
   </section>
   <section id="view-providers" class="view">
    <header class="topbar"><div><h1>Providers</h1><p>Adapters: <span id="adapterList"></span></p></div><button id="addProvider" class="btn primary">+ Add provider</button></header>
@@ -18,6 +18,7 @@
   <section id="view-evaluation" class="view">
    <header class="topbar"><div><h1>Evaluation</h1><p>Telemetry from real requests in this browser.</p></div><button id="clearTelemetry" class="btn ghost">Clear telemetry</button></header>
    <div class="stats"><div class="stat"><span id="stRequests">0</span><label>Requests</label></div><div class="stat"><span id="stLatency">—</span><label>Avg latency</label></div><div class="stat"><span id="stAvail">100%</span><label>Availability</label></div><div class="stat"><span id="stSpend">$0</span><label>Reported spend</label></div><div class="stat"><span id="stRefusals">0 (0%)</span><label>Refusals</label></div></div>
+   <div id="healthChart" class="health-chart" aria-label="Provider health"></div>
    <div id="activity" class="activity"></div>
   </section>
  </main>

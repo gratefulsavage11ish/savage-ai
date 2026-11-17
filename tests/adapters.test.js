@@ -168,6 +168,40 @@ test('streaming emits tokens and returns a normalized result', async () => {
   assert.equal(result.usage.totalTokens, 7);
 });
 
+test('stream stops reading after [DONE] even if the connection stays open', async () => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"done"}}]}\n\ndata: [DONE]\n\n'));
+      // intentionally never close
+    },
+  });
+  const result = await new OpenAICompatibleAdapter().sendMessage(
+    { id: 'p', endpoint: 'https://x/v1', model: 'm', fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: stream }) },
+    [message], { stream: true, timeoutMs: 20 },
+  );
+  assert.equal(result.responseText, 'done');
+  assert.equal(result.streamed, true);
+});
+
+test('stream idle timeouts are normalized and release the reader', async () => {
+  const stream = new ReadableStream({ start() { /* never emits */ } });
+  const adapter = new OpenAICompatibleAdapter();
+  await assert.rejects(
+    () => adapter.sendMessage({ id: 'p', endpoint: 'https://x/v1', model: 'm', fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: stream }) }, [message], { stream: true, timeoutMs: 20 }),
+    error => error.category === 'timeout' && /idle/i.test(error.message),
+  );
+});
+
+test('stream transport errors become connection errors', async () => {
+  const stream = new ReadableStream({ start(controller) { controller.error(new Error('socket reset')); } });
+  const adapter = new OpenAICompatibleAdapter();
+  await assert.rejects(
+    () => adapter.sendMessage({ id: 'p', endpoint: 'https://x/v1', model: 'm', fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: stream }) }, [message], { stream: true }),
+    error => error.category === 'connection_error' && /Streaming connection failed/.test(error.message),
+  );
+});
+
 test('custom OpenAI-compatible adapter is registered', () => {
   const adapter = new CustomOpenAICompatibleAdapter();
   assert.equal(adapter.id, 'custom-openai');

@@ -69,7 +69,7 @@ Streaming chat responses are SSE (`text/event-stream`) with `{"type":"token"|"do
 ## Verification state
 
 - `node --check app.js` and `node --check server.mjs` pass.
-- `npm test` → **35/35 passing** (adapter, refund/rate-limit/error mapping, vault, credentials, proxy, streaming, SSRF, no-fallback).
+- `npm test` → **39/39 passing** (adapter, rate-limit/error mapping, vault, credentials, proxy, streaming idle/error/cancel behavior, SSRF, no-fallback, telemetry).
 - `npm run check` runs syntax checks plus the suite.
 - Health and static hosting return 200.
 

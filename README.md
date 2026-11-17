@@ -80,6 +80,10 @@ Proxy requests carry provider metadata (`id`, `adapter`, `endpoint`, `model`, `p
 the server has no fallback path. Cross-origin mutations are refused (Origin/Sec-Fetch-Site),
 bodies must be `application/json`, and requests are rate limited per IP.
 
+Chat requests can be cancelled with the Stop control; cancelling aborts the browser request and the
+upstream provider call on the server. The Evaluation view includes a per-provider health chart built
+from real request outcomes, latency and refusal telemetry.
+
 Provider metadata (name, endpoint, model, pricing) is stored in `localStorage`; keys and
 custom headers are not. In server mode the browser uses `BackendCredentialStore` and never
 receives secret material. In prototype mode (`file://` or a plain static server) the client
@@ -88,7 +92,7 @@ falls back to `LocalCredentialStore`, which is explicitly marked insecure.
 ## Tests
 
 ```sh
-npm test        # 35 tests, no network or real keys required
+npm test        # 39 tests, no network or real keys required
 npm run check   # syntax checks + the same tests
 ```
 

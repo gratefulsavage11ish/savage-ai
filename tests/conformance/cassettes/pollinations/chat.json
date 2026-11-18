@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "kind": "savage-provider-conformance-cassette",
+  "recordedAt": "2026-11-18T07:08:35.495Z",
+  "provenance": {
+    "kind": "live",
+    "provider": "pollinations",
+    "adapter": "openai-compatible",
+    "endpoint": "https://text.pollinations.ai/openai",
+    "model": "openai-fast",
+    "auth": "none",
+    "note": "Live keyless OpenAI-compatible completion. Provider output is included verbatim; no credential was sent."
+  },
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://text.pollinations.ai/openai/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "bodyText": "{\"model\":\"openai-fast\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: SAVAGE conformance check.\"}],\"stream\":false,\"max_tokens\":32}",
+        "bodyHash": "b8c897d6850285f00c21e07f0904fe7749268957e33feb06f032fb31d7dc9089"
+      },
+      "response": {
+        "status": 200,
+        "statusText": "",
+        "headers": {
+          "access-control-allow-origin": "*",
+          "access-control-expose-headers": "Payment-Required, Payment-Response, Retry-After, Link, X-Pollinations-Logo, X-Powered-By",
+          "cf-ray": "a5c524ecadc89444-SJC",
+          "content-encoding": "gzip",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Wed, 18 Nov 2026 07:08:35 GMT",
+          "etag": "W/\"185-wLIpGmoIKcajURFp1XgI8hNTPRg\"",
+          "link": "<https://pollinations.ai>; rel=\"service\"",
+          "server": "cloudflare",
+          "x-model-used": "gpt-oss-20b",
+          "x-pollinations-logo": "https://raw.githubusercontent.com/pollinations/pollinations/main/packages/ui/src/brand/lockup-horizontal-black.svg",
+          "x-powered-by": "Pollinations.AI",
+          "x-usage-completion-text-tokens": "23",
+          "x-usage-prompt-text-tokens": "318",
+          "x-usage-total-tokens": "341"
+        },
+        "chunks": [
+          {
+            "text": "{\"id\":\"pllns_1751d1670b95d0d9780b28f7ba396bcd\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"SAVAGE conformance check.\",\"reasoning\":\"He wants exactly that phrase.\",\"tool_calls\":[]},\"finish_reason\":\"stop\"}],\"created\":1794985712,\"model\":\"gpt-oss-20b\",\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":318,\"completion_tokens\":23,\"total_tokens\":341},\"user_tier\":\"anonymous\"}"
+          }
+        ],
+        "bytes": 389,
+        "truncated": false
+      },
+      "timingMs": 6014
+    }
+  ]
+}

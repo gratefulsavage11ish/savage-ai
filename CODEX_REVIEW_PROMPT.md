@@ -28,13 +28,15 @@ src/http.js                           timed fetch, abort, usage/cost normalizati
 src/endpoint-policy.js                host allowlist, loopback gating, private-IP rejection
 src/secure-storage.js                 CredentialStore / BackendCredentialStore (no browser key store)
 src/telemetry.js                      local latency, availability, usage, cost telemetry
-tests/*.test.js                       89 tests (node --test), no network or real keys needed
+tests/*.test.js                       105 tests (node --test), no network or real keys needed
+tools/conformance/                    record/replay harness + recording CLI for provider cassettes
+tests/conformance/cassettes/          sanitized live provider exchanges replayed by the tests
 .github/workflows/ci.yml              Node 22 + 24: syntax checks + npm test
 ```
 
 Runtime facts: `node server.mjs` listens on `:3001` (`PORT`); `SAVAGE_CREDENTIAL_KEY` enables the
-encrypted file vault, otherwise an in-memory vault is used. `npm test` runs 89 tests; `npm run check`
-adds `node --check` on `app.js` and `server.mjs`. CI runs both on Node 22 and 24.
+encrypted file vault, otherwise an in-memory vault is used. `npm test` runs 105 tests; `npm run check`
+adds `node --check` on `app.js`, `server.mjs` and the recording CLI. CI runs both on Node 22 and 24.
 
 ## Non-negotiable invariants
 
@@ -122,7 +124,7 @@ State explicitly what you could not verify without real provider credentials.
 ## Deliverable 2 — Milestone 2 and Milestone 3 plan
 
 Milestone 1 is the current state: adapter architecture with real provider calls, normalized errors,
-an encrypted server vault, a working proxy, a streaming/cancellable UI, 89 tests and CI on Node 22/24.
+an encrypted server vault, a working proxy, a streaming/cancellable UI, 105 tests and CI on Node 22/24.
 
 Produce a concrete plan for **Milestone 2** and then **Milestone 3**. Ground both in the gaps your
 review actually found — the milestone should name the findings it closes.

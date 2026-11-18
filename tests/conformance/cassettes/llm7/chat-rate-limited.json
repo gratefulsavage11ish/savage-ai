@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "kind": "savage-provider-conformance-cassette",
+  "recordedAt": "2026-11-18T07:12:29.074Z",
+  "provenance": {
+    "kind": "live",
+    "provider": "llm7",
+    "adapter": "openai-compatible",
+    "endpoint": "https://api.llm7.io/v1",
+    "model": "DeepSeek-V4-Flash-0731",
+    "auth": "none",
+    "note": "Live keyless request. llm7 returned its real HTTP 429 concurrency limit response; no credential was sent."
+  },
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://api.llm7.io/v1/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "bodyText": "{\"model\":\"DeepSeek-V4-Flash-0731\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: SAVAGE conformance check.\"}],\"stream\":false,\"max_tokens\":32}",
+        "bodyHash": "d0c5bc4d89c7641bfb125806909ce5b425dc55a0d83fbe8b3536d12d9673af43"
+      },
+      "response": {
+        "status": 429,
+        "statusText": "",
+        "headers": {
+          "alt-svc": "h3=\":443\"; ma=86400",
+          "cf-cache-status": "DYNAMIC",
+          "cf-ray": "a5c52ac29f365c22-SJC",
+          "content-length": "192",
+          "content-type": "application/json",
+          "date": "Wed, 18 Nov 2026 07:12:29 GMT",
+          "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+          "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=YhU436nGAu2XJ057l%2FrhbOokCcLMVvR9ccwC1GAPyyqTE8PMA8NQAY3GuCZ%2B5%2FHFRWX9C4Fcm8jUimopVevxdGAVRoczGTzRlV6BGhCkyi374a1IfmwDspkdlp5NzeYpZeTRUoA0yD0zlA%3D%3D\"}]}",
+          "retry-after": "10",
+          "server": "cloudflare",
+          "vary": "Origin",
+          "x-request-id": "ab3f47f2b02251620ff78c269fd6afa7"
+        },
+        "chunks": [
+          {
+            "text": "{\"error\":{\"message\":\"Too many concurrent requests for this client. Retry after 10 seconds.\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":\"concurrent_request_limit_exceeded\",\"retry_after\":10}}"
+          }
+        ],
+        "bytes": 192,
+        "truncated": false
+      },
+      "timingMs": 582
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "savage-provider-conformance-cassette",
+  "recordedAt": "2026-11-18T07:08:24.736Z",
+  "provenance": {
+    "kind": "live",
+    "provider": "pollinations",
+    "adapter": "openai-compatible",
+    "endpoint": "https://text.pollinations.ai/openai",
+    "model": "openai-fast",
+    "auth": "none",
+    "note": "Live keyless request to a public OpenAI-compatible model list. No credential was sent."
+  },
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://text.pollinations.ai/openai/models",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "bodyText": null,
+        "bodyHash": null
+      },
+      "response": {
+        "status": 200,
+        "statusText": "",
+        "headers": {
+          "access-control-allow-origin": "*",
+          "access-control-expose-headers": "Payment-Required, Payment-Response, Retry-After, Link, X-Pollinations-Logo, X-Powered-By",
+          "cf-ray": "a5c524ce6d07eb31-SJC",
+          "content-encoding": "gzip",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Wed, 18 Nov 2026 07:08:24 GMT",
+          "etag": "W/\"69-5t/Y7SOqExJPNSYa88mkNSILy5I\"",
+          "link": "<https://pollinations.ai>; rel=\"service\"",
+          "server": "cloudflare",
+          "x-pollinations-logo": "https://raw.githubusercontent.com/pollinations/pollinations/main/packages/ui/src/brand/lockup-horizontal-black.svg",
+          "x-powered-by": "Pollinations.AI"
+        },
+        "chunks": [
+          {
+            "text": "{\"object\":\"list\",\"data\":[{\"id\":\"openai-fast\",\"object\":\"model\",\"created\":1794985704717,\"owned_by\":\"ovh\"}]}"
+          }
+        ],
+        "bytes": 105,
+        "truncated": false
+      },
+      "timingMs": 89
+    }
+  ]
+}

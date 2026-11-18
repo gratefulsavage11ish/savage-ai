@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test tests/*.test.js",
-    "check": "node --check app.js && node --check server.mjs && node --test tests/*.test.js"
+    "record:conformance": "node tools/conformance/record.mjs",
+    "check": "node --check app.js && node --check server.mjs && node --check tools/conformance/record.mjs && node --test tests/*.test.js"
   }
 }

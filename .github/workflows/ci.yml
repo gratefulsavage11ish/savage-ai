@@ -24,5 +24,6 @@ jobs:
         run: |
           node --check app.js
           node --check server.mjs
+          node --check tools/conformance/record.mjs
       - name: Tests
         run: npm test

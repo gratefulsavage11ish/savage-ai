@@ -8,7 +8,7 @@ Shared context for anyone continuing this build. Keep this file in sync with the
 - Repository: https://github.com/gratefulsavage11ish/savage-ai (public)
 - Branch: `freebuff/174eb48b615d40af2fb498a5` (repository default branch)
 - Runtime: Node.js 26 (ESM, no dependencies, no build step)
-- Files: `index.html`, `styles.css`, `app.js`, `server.mjs`, `src/`, `tests/`, `package.json`, `README.md`
+- Files: `index.html`, `styles.css`, `app.js`, `server.mjs`, `src/`, `tests/`, `tools/conformance/`, `package.json`, `README.md`
 
 ## Run the development server
 
@@ -70,10 +70,12 @@ Streaming chat responses are SSE (`text/event-stream`) with `{"type":"token"|"do
 ## Verification state
 
 - `node --check app.js` and `node --check server.mjs` pass.
-- `npm test` → **89/89 passing** (adapters, SSE parsing, error categories, cancellation vs timeouts,
+- `npm test` → **105/105 passing** (adapters, SSE parsing, error categories, cancellation vs timeouts,
   header sanitization, usage/cost, corrupt/truncated/concurrent vault writes, permissions, credentials,
   proxy, client-disconnect abort propagation, streaming idle/error/cancel behavior, IPv6/SSRF,
-  request lifecycle, no-fallback, telemetry).
+  request lifecycle, no-fallback, telemetry, and record/replay of live provider cassettes).
+- `tools/conformance/` records real provider traffic into sanitized cassettes; replay is strict,
+  network-free and key-free. Record new exchanges with `npm run record:conformance -- --help`.
 - `npm run check` runs syntax checks plus the suite.
 - Health and static hosting return 200.
 
@@ -91,6 +93,8 @@ Streaming chat responses are SSE (`text/event-stream`) with `{"type":"token"|"do
 - `app.js` — auto-detects the backend; `BackendCredentialStore` only and **no** browser key storage
   (fails closed without the server); accessible ⋯ menu and focus-trapped modal; streaming chat;
   normalized errors with same-provider retry.
+- `tools/conformance/` — recording fetch, strict replay, sanitized cassette writer and recording CLI;
+  `tests/conformance/cassettes/` holds the live provider exchanges replayed by the suite.
 
 ## Known gaps (do not treat as done)
 
@@ -100,5 +104,8 @@ Streaming chat responses are SSE (`text/event-stream`) with `{"type":"token"|"do
 4. DNS rebinding is **not solved**: the resolve check and the outbound connection are separate
    steps, and dependency-free `fetch` cannot pin the resolved address. Use an enforcing egress proxy
    or address pinning in production.
-5. Real provider credentials are not configured. `openai-compatible` hosts must be added to
-   `SAVAGE_ALLOWED_HOSTS`; Hugging Face / Venice need their own keys.
+5. Authenticated provider calls are still untested: no real keys are configured. Keyless live
+   traffic (Pollinations model list/completion/stream, Hugging Face 401, llm7 429) is recorded and
+   replayed. Record authenticated successes with `npm run record:conformance` once keys are available.
+   `openai-compatible` hosts must be added to `SAVAGE_ALLOWED_HOSTS`; Hugging Face / Venice need
+   their own keys.

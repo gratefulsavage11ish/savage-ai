@@ -38,6 +38,7 @@ Shared pieces:
   It never retries and never switches provider/model.
 - `src/endpoint-policy.js` — host allowlisting, loopback gating, private/link-local IP rejection.
 - `src/telemetry.js` — local latency, availability, usage and cost telemetry.
+- `tools/conformance/` — record/replay harness and recording CLI for sanitized provider cassettes.
 - `server.mjs` — encrypted vault, credential API, provider proxy, audit log, rate limiter, static host.
 
 Normalized success result:
@@ -106,9 +107,13 @@ closed, disables key entry and asks for the server instead of writing keys to st
 ## Tests
 
 ```sh
-npm test        # 89 tests, no network or real keys required
+npm test        # 105 tests, no network or real keys required
 npm run check   # syntax checks + the same tests
 ```
+
+`tests/conformance/cassettes/` contains sanitized recordings of real provider HTTP exchanges. They
+are replayed through the adapters on every test run, so provider wire formats are exercised without
+keys or network access. Record/replay details are below.
 
 Covers provider registration, adapter selection, OpenAI-compatible/HF/Venice/custom requests,
 SSE parsing (chunking, CRLF, multiline data, split UTF-8, `[DONE]`, no-`[DONE]` policy), model
@@ -118,7 +123,46 @@ normalization, credential encryption at rest (ciphertext contains no plaintext),
 vaults, wrong keys, concurrent and failed atomic writes, file permissions, credential endpoints,
 CSRF/JSON enforcement, proxy chat/models/test, client-disconnect abort propagation, streaming
 through the proxy, SSRF/IPv6/allowlist/loopback rejection, static file exposure, and
-no-silent-fallback at both the service and proxy layers.
+no-silent-fallback at both the service and proxy layers. Recorded provider traffic covers model
+discovery, completions, real SSE streams, 401 authentication failures and 429 rate limits; replay
+asserts the recorded request body matches exactly and never reaches the network.
+
+## Provider conformance cassettes
+
+Real provider exchanges are recorded into `tests/conformance/cassettes/` and replayed by the test
+suite. Replay needs no keys and makes no network calls; it is strict about method, URL and request
+body hash and throws on an unmatched request rather than falling back to `fetch`.
+
+Record a cassette (network and a provider key are needed for authenticated providers):
+
+```sh
+# Keyless public OpenAI-compatible endpoint
+npm run record:conformance -- \
+  --provider pollinations --adapter openai-compatible \
+  --endpoint https://text.pollinations.ai/openai --model openai-fast \
+  --operation chat --out tests/conformance/cassettes/pollinations/chat.json
+
+# Authenticated provider: keys come from the environment only
+HF_TOKEN=... npm run record:conformance -- --provider huggingface \
+  --operation chat --stream --out tests/conformance/cassettes/huggingface/chat.json
+```
+
+`--key-env NAME` selects a specific variable; otherwise `SAVAGE_RECORD_KEY` and provider
+conventions (`HF_TOKEN`, `VENICE_API_KEY`, `OPENAI_API_KEY`) are checked. A key is never accepted as
+a command-line argument, written to a cassette, or printed.
+
+Each cassette stores the request method/URL, a SHA-256 of the request body, redacted headers, the
+provider's status and headers, and the exact response bytes in the chunks the network delivered
+(UTF-8 text, or base64 when a chunk splits a multi-byte character). `authorization`, cookies and
+other credential-bearing headers become `[REDACTED]`; occurrences of the key are scrubbed from
+bodies and headers too, and the writer refuses to save a cassette if a secret is still present.
+`provenance.kind` separates `live` provider traffic from `local` test doubles and `synthetic`
+fixtures, so a local recording is never presented as real traffic.
+
+Current live cassettes: Pollinations model list, completion and SSE stream (keyless), Hugging Face
+HTTP 401 and llm7 HTTP 429. Authenticated success recordings still require the user's provider
+keys. Cassettes are snapshots of provider behaviour: re-record them when a provider changes its
+wire format.
 
 ## Add a provider adapter
 
@@ -132,6 +176,9 @@ registry.register(new MyAdapter());
 
 Then allowlist its host in `src/endpoint-policy.js` (or `SAVAGE_ALLOWED_HOSTS`) and add it to the
 adapter `<select>` in `index.html`. No application rebuild or registry changes elsewhere.
+
+Record a cassette for the new provider once you have a key, then add a replay test so its wire
+format stays covered without live credentials.
 
 ## Still required before production
 

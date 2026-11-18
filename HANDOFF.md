@@ -28,8 +28,9 @@ node server.mjs
 | `SAVAGE_ALLOWED_HOSTS` | unset | Comma-separated extra provider hosts allowed by the proxy |
 | `SAVAGE_ALLOW_LOCAL` | `1` | Set `0` to refuse loopback provider endpoints |
 
-Current live process: **port 3001, in-memory vault (`memory-dev`), no authentication, no stored credentials.**
-Because no `SAVAGE_CREDENTIAL_KEY` is set, do not expect credentials to persist across restarts.
+No server process is guaranteed to survive a workspace restart: start it with the command above.
+It runs with an in-memory vault (`memory-dev`), no authentication and no stored credentials unless
+you set `SAVAGE_CREDENTIAL_KEY`.
 
 ## Live endpoints
 
@@ -69,7 +70,10 @@ Streaming chat responses are SSE (`text/event-stream`) with `{"type":"token"|"do
 ## Verification state
 
 - `node --check app.js` and `node --check server.mjs` pass.
-- `npm test` → **39/39 passing** (adapter, rate-limit/error mapping, vault, credentials, proxy, streaming idle/error/cancel behavior, SSRF, no-fallback, telemetry).
+- `npm test` → **89/89 passing** (adapters, SSE parsing, error categories, cancellation vs timeouts,
+  header sanitization, usage/cost, corrupt/truncated/concurrent vault writes, permissions, credentials,
+  proxy, client-disconnect abort propagation, streaming idle/error/cancel behavior, IPv6/SSRF,
+  request lifecycle, no-fallback, telemetry).
 - `npm run check` runs syntax checks plus the suite.
 - Health and static hosting return 200.
 
@@ -80,14 +84,21 @@ Streaming chat responses are SSE (`text/event-stream`) with `{"type":"token"|"do
 - `src/chat-service.js` — exactly one adapter per request; normalized errors rethrown; **never** retries or switches provider/model.
 - `src/endpoint-policy.js` — host allowlisting, loopback gating, private/link-local rejection.
 - `src/http.js` — timed fetch, `redirect: 'manual'` (redirects refused), usage/cost normalization.
-- `server.mjs` — vault, credential API, SSRF-guarded proxy, audit log, rate limiter, static host.
-- `app.js` — auto-detects the backend; proxy mode uses `BackendCredentialStore`; accessible ⋯ menu; streaming chat; normalized errors with same-provider retry.
+- `src/sse.js` — shared SSE parser (chunking, CRLF, multiline data, split UTF-8, `[DONE]`).
+- `src/request-lifecycle.js` — frozen provider snapshot per request; stale/late-token suppression.
+- `server.mjs` — fail-closed vault, credential API, SSRF-guarded proxy, audit log, rate limiter,
+  client-disconnect abort propagation, static host.
+- `app.js` — auto-detects the backend; `BackendCredentialStore` only and **no** browser key storage
+  (fails closed without the server); accessible ⋯ menu and focus-trapped modal; streaming chat;
+  normalized errors with same-provider retry.
 
 ## Known gaps (do not treat as done)
 
 1. No authentication/authorization; anyone who can reach the server can use stored credentials.
 2. Dev file vault, not KMS/encrypted DB; no key rotation.
 3. No per-user rate limits, CSRF tokens, audit retention, or alerting.
-4. DNS rebinding TOCTOU remains between the SSRF resolve check and the request.
+4. DNS rebinding is **not solved**: the resolve check and the outbound connection are separate
+   steps, and dependency-free `fetch` cannot pin the resolved address. Use an enforcing egress proxy
+   or address pinning in production.
 5. Real provider credentials are not configured. `openai-compatible` hosts must be added to
    `SAVAGE_ALLOWED_HOSTS`; Hugging Face / Venice need their own keys.

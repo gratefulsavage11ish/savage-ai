@@ -1,4 +1,4 @@
-import { NormalizedError, normalizeHttpStatus, detectRefusal } from '../errors.js';
+import { NormalizedError, normalizeHttpStatus, refusalMessage } from '../errors.js';
 import { timedFetch, parseJsonSafe, joinUrl, computeCost, successResult } from '../http.js';
 import { OpenAICompatibleAdapter } from './openai-compatible.js';
 // Hugging Face: OpenAI-compatible router endpoint (https://router.huggingface.co/v1) is preferred;
@@ -21,7 +21,8 @@ export class HuggingFaceAdapter extends OpenAICompatibleAdapter {
     const body = await parseJsonSafe(res);
     if (!res.ok) throw normalizeHttpStatus(res.status, { providerId: config.id, model: config.model, body });
     const text = Array.isArray(body) ? body[0]?.generated_text || '' : body?.generated_text || '';
-    if (!text && detectRefusal(body?.error)) throw new NormalizedError({ category: 'provider_refusal', providerId: config.id, model: config.model, message: 'Provider refused this request.' });
+    const refusal = refusalMessage(body);
+    if (!text && refusal) throw new NormalizedError({ category: 'provider_refusal', providerId: config.id, model: config.model, message: refusal });
     return successResult({ providerId: config.id, model: config.model, responseText: text, usage: null, latencyMs, cost: computeCost(null, config.pricing), requestId: res.headers?.get?.('x-request-id') || null });
   }
 }

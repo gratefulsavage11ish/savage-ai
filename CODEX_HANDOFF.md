@@ -15,7 +15,7 @@ CONTEXT
 - Runtime: Node.js 26, ESM, zero dependencies, no build step.
 - Read first: HANDOFF.md, README.md, src/provider-registry.js, src/chat-service.js,
   src/adapters/openai-compatible.js, src/endpoint-policy.js, server.mjs, tests/proxy.test.js.
-- Run: `npm test` (39/39 passing), `npm run check`, `node server.mjs` (PORT 3001).
+- Run: `npm test` (89/89 passing), `npm run check`, `node server.mjs` (PORT 3001).
 - Persistence requires `SAVAGE_CREDENTIAL_KEY="$(openssl rand -hex 32)"`; without it the server
   uses a non-persistent in-memory vault. Provider hosts beyond Hugging Face/Venice must be added
   to `SAVAGE_ALLOWED_HOSTS`. `SAVAGE_ALLOW_LOCAL=0` disables loopback endpoints.
@@ -29,11 +29,15 @@ WHAT EXISTS
   rate_limit, connection_error, timeout, server_error, model_unavailable, unknown_error.
 - ChatService calls exactly one adapter and rethrows; no retry, no silent fallback, no automatic
   model switch. Provider selection is always explicit and stays put after failures.
-- Server: AES-256-GCM credential vault + credential API (secrets write-only), SSRF-guarded proxy
-  (host allowlisting, private/link-local rejection, redirects refused, loopback gated),
-  SSE streaming proxy, audit summary, per-IP rate limiting, Origin/Sec-Fetch-Site checks.
-- Frontend: proxy-mode auto-detection with BackendCredentialStore, streaming chat, normalized
-  error cards with same-provider retry, accessible provider menu, telemetry dashboard.
+- Server: AES-256-GCM credential vault + credential API (secrets write-only, corrupt or
+  truncated vaults fail closed), SSRF-guarded proxy (host allowlisting, private/link-local/IPv6
+  rejection, redirects refused, loopback gated), SSE streaming proxy with client-disconnect abort
+  propagation, audit summary, per-IP rate limiting, Origin/Sec-Fetch-Site checks.
+- Shared SSE parser (`src/sse.js`) and request lifecycle (`src/request-lifecycle.js`): frozen
+  provider snapshot per request, stale-response and late-token suppression.
+- Frontend: proxy-mode auto-detection with BackendCredentialStore only — no browser key storage
+  and no fallback when the backend is missing; streaming chat with Stop, normalized error cards
+  with same-provider retry, accessible provider menu and focus-trapped modal, telemetry dashboard.
 
 INVARIANTS — DO NOT BREAK
 1. Never silently switch provider or model, and never auto-retry a refusal.

@@ -15,6 +15,7 @@ import { createDefaultRegistry } from './src/provider-registry.js';
 import { ChatService } from './src/chat-service.js';
 import { NormalizedError, ERROR_CATEGORIES } from './src/errors.js';
 import { assertEndpointUrl, assertEndpointResolvesSafely } from './src/endpoint-policy.js';
+import { RESERVED_HEADERS } from './src/adapters/openai-compatible.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BODY = 1024 * 1024;
@@ -41,26 +42,46 @@ class AesVault {
       decipher.setAuthTag(Buffer.from(entry.tag, 'base64'));
       return Buffer.concat([decipher.update(Buffer.from(entry.ct, 'base64')), decipher.final()]).toString('utf8');
     } catch {
-      throw new NormalizedError({ category: 'server_error', message: 'Credential vault could not be decrypted (wrong key or corrupt vault).' });
+      throw new NormalizedError({ category: 'server_error', code: 'vault_decrypt_failed', message: 'Credential vault could not be decrypted (wrong key or corrupt vault).' });
     }
   }
 }
 
+const corruptVault = (message = 'Credential vault is unreadable or truncated. Restore a backup before storing credentials.') =>
+  new NormalizedError({ category: 'server_error', code: 'vault_corrupt', message });
+
 export class FileCredentialVault {
-  constructor({ file, key }) {
+  constructor({ file, key, fsImpl = fs }) {
     this.file = file; this.kind = 'encrypted-file-dev'; this.insecure = false; this.cipher = new AesVault(key);
-    this.queue = Promise.resolve();
+    this.fs = fsImpl; this.queue = Promise.resolve();
   }
+  // Fail closed: a vault that cannot be parsed is never silently replaced with
+  // an empty one, and no error detail (path, parser text) reaches the client.
   async #load() {
-    try { return JSON.parse(await fs.readFile(this.file, 'utf8')).entries || {}; }
-    catch (err) { if (err.code === 'ENOENT') return {}; throw err; }
+    let raw;
+    try { raw = await this.fs.readFile(this.file, 'utf8'); }
+    catch (err) {
+      if (err?.code === 'ENOENT') return {};
+      throw new NormalizedError({ category: 'server_error', code: 'vault_unreadable', message: 'Credential vault could not be read. No credentials were changed.' });
+    }
+    if (!String(raw || '').trim()) throw corruptVault('Credential vault is empty or truncated. Restore a backup before storing credentials.');
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { throw corruptVault(); }
+    if (!parsed || typeof parsed !== 'object' || !parsed.entries || typeof parsed.entries !== 'object' || Array.isArray(parsed.entries)) throw corruptVault();
+    return parsed.entries;
   }
   async #save(entries) {
-    await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = `${this.file}.${crypto.randomBytes(6).toString('hex')}`;
     const payload = JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), entries });
-    await fs.writeFile(tmp, payload, { mode: 0o600 });
-    await fs.rename(tmp, this.file);
+    try {
+      await this.fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
+      await this.fs.writeFile(tmp, payload, { mode: 0o600 });
+      await this.fs.chmod?.(tmp, 0o600);
+      await this.fs.rename(tmp, this.file); // atomic replacement: readers see the old or the new file
+    } catch {
+      try { await this.fs.unlink(tmp); } catch { /* nothing to clean up */ }
+      throw new NormalizedError({ category: 'server_error', code: 'vault_write_failed', message: 'Credential vault could not be written. No credentials were changed.' });
+    }
   }
   async set(id, value) {
     const run = this.queue.then(async () => { const entries = await this.#load(); entries[id] = this.cipher.encrypt(JSON.stringify(value ?? {})); await this.#save(entries); });
@@ -136,6 +157,7 @@ const STATUS_BY_CATEGORY = {
 const asNormalized = (err) => (err instanceof NormalizedError ? err : new NormalizedError({ category: 'unknown_error', message: err?.message || 'Unexpected server error.' }));
 
 function sendJson(res, status, payload, extraHeaders = {}) {
+  if (res.writableEnded || res.destroyed) return;
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body), ...extraHeaders });
   res.end(body);
@@ -193,12 +215,14 @@ export function createSavageServer({
     let headers = input;
     if (typeof headers === 'string') { try { headers = JSON.parse(headers); } catch { throw new NormalizedError({ category: 'invalid_request', message: 'Custom headers must be valid JSON.' }); } }
     if (typeof headers !== 'object' || Array.isArray(headers)) throw new NormalizedError({ category: 'invalid_request', message: 'Custom headers must be a JSON object.' });
-    const banned = new Set(['authorization', 'host', 'content-length', 'connection', 'transfer-encoding', 'cookie', 'set-cookie', 'x-forwarded-for']);
+    const banned = RESERVED_HEADERS;
     const out = {};
     for (const [key, value] of Object.entries(headers).slice(0, 50)) {
       if (banned.has(key.toLowerCase())) continue;
-      if (!/^[A-Za-z0-9-]{1,64}$/.test(key)) throw new NormalizedError({ category: 'invalid_request', message: `Invalid header name "${key}".` });
-      out[key] = String(value).slice(0, 2048);
+      if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(key)) throw new NormalizedError({ category: 'invalid_request', message: `Invalid header name "${key}".` });
+      const text = String(value ?? '');
+      if (/[\r\n\0]/.test(text)) throw new NormalizedError({ category: 'invalid_request', message: `Header "${key}" must not contain line breaks.` });
+      out[key] = text.slice(0, 2048);
     }
     return Object.keys(out).length ? out : undefined;
   }
@@ -258,7 +282,10 @@ export function createSavageServer({
     return provider;
   }
 
-  const sseWrite = (res, payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  const sseWrite = (res, payload) => {
+    if (res.writableEnded || res.destroyed || res.writable === false) return false;
+    return res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
 
   async function proxyChat(req, res, provider, body, auditBase) {
     const messages = sanitizeMessages(body.messages);
@@ -266,8 +293,12 @@ export function createSavageServer({
     const started = Date.now();
     // Stop upstream work if the browser cancels the request.
     const controller = new AbortController();
-    const onClose = () => { if (!res.writableEnded) controller.abort(); };
-    res.on('close', onClose);
+    let aborted = false;
+    const abortUpstream = () => { if (aborted) return; aborted = true; controller.abort(); };
+    const onClose = () => { if (!res.writableEnded) abortUpstream(); };
+    const onAborted = () => abortUpstream();
+    req.once('aborted', onAborted);
+    res.once('close', onClose);
     if (options.stream) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.flushHeaders?.();
@@ -281,8 +312,10 @@ export function createSavageServer({
         if (!res.writableEnded) sseWrite(res, { type: 'error', error: n.toJSON() });
       } finally {
         res.off('close', onClose);
+        req.off('aborted', onAborted);
       }
-      return res.end();
+      if (!res.writableEnded && !res.destroyed) res.end();
+      return;
     }
     try {
       const result = await service.send(provider, messages, { ...options, signal: controller.signal });
@@ -294,6 +327,7 @@ export function createSavageServer({
       throw n;
     } finally {
       res.off('close', onClose);
+      req.off('aborted', onAborted);
     }
   }
 
@@ -308,7 +342,7 @@ export function createSavageServer({
 
     if (resource === 'health' && req.method === 'GET') {
       return sendJson(res, 200, {
-        ok: true, service: 'savage-ai', version: '2.0.0', mode: 'development',
+        ok: true, service: 'savage-ai', version: '2.1.0', mode: 'development',
         vault: vault.kind, persistent: vault.kind === 'encrypted-file-dev', auth: false,
         adapters: registry.list(), errorCategories: Object.values(ERROR_CATEGORIES),
         warnings: [
@@ -335,7 +369,7 @@ export function createSavageServer({
         if (secret.length > 8192) throw new NormalizedError({ category: 'invalid_request', message: 'Credential is too large.' });
         const headers = sanitizeHeaders(body.headers);
         if (!secret && !headers) throw new NormalizedError({ category: 'invalid_request', message: 'Nothing to store: provide a secret and/or headers.' });
-        const existing = (await vault.get(providerId).catch(() => null)) || {};
+        const existing = (await vault.get(providerId)) || {}; // fail closed: never overwrite a corrupt vault
         await vault.set(providerId, { secret: secret || existing.secret || '', headers: headers ?? existing.headers });
         await audit.record({ providerId, action: 'credentials.put', outcome: 'ok', ip, hasHeaders: Boolean(headers), secretUpdated: Boolean(secret) });
         return sendJson(res, 200, { ok: true, id: providerId, configured: true });
@@ -407,6 +441,7 @@ export function createSavageServer({
     } catch (err) {
       const n = asNormalized(err);
       if (n.category !== 'invalid_request' || n.status) logger.warn?.(`[savage] ${n.category}: ${n.message}`);
+      if (res.destroyed) return;
       if (!res.headersSent) sendError(res, n);
       else res.end();
     }

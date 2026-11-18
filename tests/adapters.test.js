@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ProviderRegistry, createDefaultRegistry, BUILTIN_PROVIDERS } from '../src/provider-registry.js';
-import { OpenAICompatibleAdapter, CustomOpenAICompatibleAdapter } from '../src/adapters/openai-compatible.js';
+import { OpenAICompatibleAdapter, CustomOpenAICompatibleAdapter, sanitizeCustomHeaders } from '../src/adapters/openai-compatible.js';
 import { HuggingFaceAdapter } from '../src/adapters/huggingface.js';
 import { VeniceAdapter } from '../src/adapters/venice.js';
 import { ChatService } from '../src/chat-service.js';
 import { Telemetry } from '../src/telemetry.js';
 import { NormalizedError } from '../src/errors.js';
+import { normalizeUsage } from '../src/http.js';
 
 const jsonRes = (body, status = 200, headers = {}) => ({
   ok: status < 400, status,
@@ -234,4 +235,208 @@ test('disabled provider is refused without trying others', async () => {
 test('unknown adapter fails closed', async () => {
   const service = new ChatService(createDefaultRegistry(), new Telemetry());
   await assert.rejects(() => service.send({ id: 'p', adapter: 'nope', enabled: true, model: 'm' }, [message]), error => error.category === 'invalid_request' && /No adapter registered/.test(error.message));
+});
+
+// ---------- Milestone 2: headers, errors, usage, cancellation, streams ----------
+const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+const baseConfig = (overrides = {}) => ({ id: 'p', endpoint: 'https://x/v1', model: 'm', ...overrides });
+
+test('reserved headers can never override Authorization, Host or forwarding headers', async () => {
+  let headers = null;
+  const fetchImpl = async (url, init) => { headers = init.headers; return jsonResponse({ choices: [{ message: { content: 'ok' } }] }); };
+  await new OpenAICompatibleAdapter().sendMessage(baseConfig({
+    apiKey: 'real-key', fetchImpl,
+    customHeaders: { Authorization: 'Bearer attacker', Host: 'evil.test', Cookie: 'session=1', 'X-Forwarded-For': '1.2.3.4', 'X-Trace': 'yes' },
+  }), [message]);
+  assert.equal(headers.Authorization, 'Bearer real-key');
+  assert.equal(headers.Host, undefined);
+  assert.equal(headers.Cookie, undefined);
+  assert.equal(headers['x-forwarded-for'], undefined);
+  assert.equal(headers['X-Trace'], 'yes');
+});
+
+test('custom header injection and invalid names are rejected in the adapter', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  const fetchImpl = async () => jsonResponse({ choices: [{ message: { content: 'ok' } }] });
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl, customHeaders: { 'X-Bad': 'value\r\nInjected: 1' } }), [message]),
+    error => error.category === 'invalid_request' && /line breaks/.test(error.message),
+  );
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl, customHeaders: { 'Bad Name': 'x' } }), [message]),
+    error => error.category === 'invalid_request',
+  );
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl, customHeaders: '{not json' }), [message]),
+    error => error.category === 'invalid_request',
+  );
+});
+
+test('sanitizeCustomHeaders drops reserved names and keeps the rest', () => {
+  assert.deepEqual(sanitizeCustomHeaders({ authorization: 'x', HOST: 'y', 'X-Org': 'acme' }), { 'X-Org': 'acme' });
+  assert.equal(sanitizeCustomHeaders(''), undefined);
+  assert.equal(sanitizeCustomHeaders({ Authorization: 'x' }), undefined);
+});
+
+test('402, 413, 415 and 451 map to explicit categories and codes', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  const cases = [
+    [402, 'rate_limit', 'payment_required', false],
+    [413, 'invalid_request', 'payload_too_large', false],
+    [415, 'invalid_request', 'unsupported_media_type', false],
+    [451, 'provider_refusal', 'unavailable_for_legal_reasons', false],
+  ];
+  for (const [status, category, code, retryable] of cases) {
+    const fetchImpl = async () => jsonResponse({ error: { message: 'provider says no' } }, status);
+    await assert.rejects(
+      () => adapter.sendMessage(baseConfig({ fetchImpl }), [message]),
+      error => error.category === category && error.code === code && error.status === status && error.retryable === retryable,
+      `HTTP ${status} should be ${category}/${code}`,
+    );
+  }
+});
+
+test('404 distinguishes an endpoint miss from a missing model', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => jsonResponse({ error: { message: 'model not found' } }, 404) }), [message]),
+    error => error.category === 'model_unavailable',
+  );
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => jsonResponse({ error: { message: 'unknown endpoint /v1/chat/completions' } }, 404) }), [message]),
+    error => error.category === 'invalid_request' && error.code === 'endpoint_not_found',
+  );
+});
+
+test('malformed JSON, missing choices and empty completions are explicit server errors', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => new Response('not json at all', { status: 200 }) }), [message]),
+    error => error.category === 'server_error' && error.code === 'malformed_json',
+  );
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => jsonResponse({ id: 'x' }) }), [message]),
+    error => error.category === 'server_error' && error.code === 'malformed_response',
+  );
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => jsonResponse({ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }) }), [message]),
+    error => error.category === 'server_error' && error.code === 'empty_completion',
+  );
+});
+
+test('provider refusal fields are refusals; ordinary assistant text is not', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => jsonResponse({ error: { code: 'content_policy_violation', message: 'blocked' } }) }), [message]),
+    error => error.category === 'provider_refusal',
+  );
+  const answer = 'I cannot help with that refusal policy question — but here is the actual answer.';
+  const result = await adapter.sendMessage(baseConfig({ fetchImpl: async () => jsonResponse({ choices: [{ message: { content: answer } }] }) }), [message]);
+  assert.equal(result.ok, true);
+  assert.equal(result.responseText, answer);
+});
+
+test('usage normalization preserves cached/reasoning tokens, extra fields and null vs zero', () => {
+  const usage = normalizeUsage({
+    prompt_tokens: 10, completion_tokens: 0, total_tokens: 10,
+    prompt_tokens_details: { cached_tokens: 4 }, completion_tokens_details: { reasoning_tokens: 2 }, throughput: 12,
+  });
+  assert.equal(usage.promptTokens, 10);
+  assert.equal(usage.completionTokens, 0);
+  assert.equal(usage.cachedTokens, 4);
+  assert.equal(usage.reasoningTokens, 2);
+  assert.equal(usage.totalTokens, 10);
+  assert.equal(usage.reportedCost, null);
+  assert.equal(usage.extra.throughput, 12);
+  assert.equal(normalizeUsage(null), null);
+
+  const missing = normalizeUsage({ prompt_tokens: 3 });
+  assert.equal(missing.completionTokens, null, 'missing is null, not zero');
+  assert.equal(missing.cachedTokens, null);
+});
+
+test('cost is never invented when usage is missing and is labelled by source', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  const pricing = { inputPer1M: 1, outputPer1M: 2 };
+  const noUsage = await adapter.sendMessage(baseConfig({ pricing, fetchImpl: async () => jsonResponse({ choices: [{ message: { content: 'hi' } }] }) }), [message]);
+  assert.equal(noUsage.cost, null);
+  assert.equal(noUsage.costSource, null);
+
+  const estimated = await adapter.sendMessage(baseConfig({ pricing, fetchImpl: async () => jsonResponse({ choices: [{ message: { content: 'hi' } }], usage: { prompt_tokens: 1_000_000, completion_tokens: 0 } }) }), [message]);
+  assert.equal(estimated.cost, 1);
+  assert.equal(estimated.costSource, 'estimated');
+
+  const reported = await adapter.sendMessage(baseConfig({ pricing, fetchImpl: async () => jsonResponse({ choices: [{ message: { content: 'hi' } }], usage: { prompt_tokens: 5, completion_tokens: 1, cost: 0.0042 } }) }), [message]);
+  assert.equal(reported.cost, 0.0042);
+  assert.equal(reported.costSource, 'reported');
+});
+
+test('cancelling mid-stream stops tokens, releases the reader and reports cancellation', async () => {
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"first"}}]}\n\n')); },
+    cancel() { cancelled = true; },
+  });
+  const abort = new AbortController();
+  const tokens = [];
+  const promise = new OpenAICompatibleAdapter().sendMessage(
+    baseConfig({ fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: stream }) }),
+    [message],
+    { stream: true, signal: abort.signal, onToken: delta => { tokens.push(delta); abort.abort(); } },
+  );
+  await assert.rejects(promise, error => error.category === 'timeout' && error.cancelled === true && error.code === 'user_cancelled');
+  assert.deepEqual(tokens, ['first']);
+  assert.equal(cancelled, true, 'the reader must be released on cancellation');
+});
+
+test('a stream without [DONE] is returned but marked incomplete', async () => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await new OpenAICompatibleAdapter().sendMessage(
+    baseConfig({ fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: stream }) }),
+    [message], { stream: true },
+  );
+  assert.equal(result.responseText, 'partial');
+  assert.equal(result.complete, false);
+  assert.equal(result.terminatedBy, 'eof');
+  assert.match(result.warning, /without \[DONE\]/);
+});
+
+test('a terminal finish_reason without [DONE] is treated as complete', async () => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await new OpenAICompatibleAdapter().sendMessage(
+    baseConfig({ fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: stream }) }),
+    [message], { stream: true },
+  );
+  assert.equal(result.complete, true);
+  assert.equal(result.terminatedBy, 'finish_reason');
+  assert.equal(result.warning, undefined);
+});
+
+test('request timeout and stream idle timeout are reported distinctly', async () => {
+  const adapter = new OpenAICompatibleAdapter();
+  const hangingFetch = (url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => { const error = new Error('aborted'); error.name = 'AbortError'; reject(error); });
+  });
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: hangingFetch }), [message], { timeoutMs: 20 }),
+    error => error.category === 'timeout' && error.code === 'request_timeout' && /did not respond/.test(error.message),
+  );
+  const silent = new ReadableStream({ start() { /* never emits */ } });
+  await assert.rejects(
+    () => adapter.sendMessage(baseConfig({ fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: silent }) }), [message], { stream: true, timeoutMs: 20 }),
+    error => error.category === 'timeout' && error.code === 'stream_idle_timeout' && /idle/i.test(error.message),
+  );
 });

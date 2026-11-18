@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startSavage, startUpstream, api } from './helpers.js';
+import { ProviderRegistry } from '../src/provider-registry.js';
+import { NormalizedError } from '../src/errors.js';
 
 const providerFor = (upstream, overrides = {}) => ({
   id: 'p1', name: 'Test provider', adapter: 'openai-compatible',
@@ -192,6 +194,75 @@ test('client custom headers cannot override Authorization', async () => {
     assert.equal(response.status, 200);
     assert.equal(upstream.calls[0].headers.authorization, 'Bearer vault-secret');
     assert.equal(upstream.calls[0].headers['x-trace'], 'yes');
+  } finally { await upstream.close(); await ctx.close(); }
+});
+
+test('client disconnect aborts the upstream provider call', async () => {
+  let aborted = false;
+  const adapter = {
+    id: 'fake', label: 'Fake', supportsStreaming: true, supportsListModels: true,
+    async sendMessage(config, messages, options) {
+      return await new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          aborted = true;
+          reject(new NormalizedError({ category: 'timeout', cancelled: true, message: 'cancelled by client' }));
+        }, { once: true });
+      });
+    },
+    normalizeError: error => error,
+  };
+  const ctx = await startSavage({ registry: new ProviderRegistry().register(adapter) });
+  try {
+    const controller = new AbortController();
+    const request = fetch(`${ctx.base}/api/proxy/p1/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: ctx.base },
+      body: JSON.stringify(chatBody({ id: 'p1', adapter: 'fake', endpoint: 'http://127.0.0.1:1/v1', model: 'm' })),
+      signal: controller.signal,
+    });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    controller.abort();
+    await assert.rejects(request);
+    for (let attempt = 0; attempt < 40 && !aborted; attempt += 1) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(aborted, true, 'the server must abort the upstream call when the browser disconnects');
+  } finally { await ctx.close(); }
+});
+
+test('a provider stream error is forwarded as a normalized SSE error event', async () => {
+  const upstream = await startUpstream(() => ({ headers: { 'Content-Type': 'text/event-stream' }, raw: 'data: {"error":{"message":"upstream exploded"}}\n\n' }));
+  const ctx = await startSavage();
+  try {
+    const response = await fetch(`${ctx.base}/api/proxy/p1/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: ctx.base },
+      body: JSON.stringify(chatBody(providerFor(upstream), { stream: true })),
+    });
+    const text = await response.text();
+    const events = text.split('\n\n').filter(Boolean).map(frame => JSON.parse(frame.replace(/^data:\s*/, '')));
+    const failure = events.find(event => event.type === 'error');
+    assert.ok(failure, 'an error event must be sent instead of a silent close');
+    assert.equal(failure.error.category, 'server_error');
+  } finally { await upstream.close(); await ctx.close(); }
+});
+
+test('proxy strips reserved custom headers and rejects header injection', async () => {
+  const upstream = await startUpstream(() => ({ body: { choices: [{ message: { content: 'ok' } }] } }));
+  const ctx = await startSavage();
+  try {
+    const cleaned = await api(ctx.base, '/api/proxy/p1/chat', {
+      body: chatBody(providerFor(upstream, { customHeaders: { Host: 'evil.test', Cookie: 'a=b', 'X-Trace': 'yes' } })),
+    });
+    assert.equal(cleaned.status, 200, cleaned.text);
+    assert.notEqual(upstream.calls[0].headers.host, 'evil.test');
+    assert.equal(upstream.calls[0].headers.cookie, undefined);
+    assert.equal(upstream.calls[0].headers['x-trace'], 'yes');
+
+    const injected = await api(ctx.base, '/api/proxy/p1/chat', {
+      body: chatBody(providerFor(upstream, { customHeaders: { 'X-Bad': 'a\r\nInjected: 1' } })),
+    });
+    assert.equal(injected.status, 400);
+    assert.match(injected.json.error.message, /line breaks/);
+    assert.equal(upstream.calls.length, 1, 'no upstream call for a rejected header');
   } finally { await upstream.close(); await ctx.close(); }
 });
 

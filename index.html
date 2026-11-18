@@ -3,7 +3,7 @@
 <div class="app">
  <aside class="sidebar"><div class="logo">SAVAGE<span>AI</span></div><p class="tag">Provider-independent control center</p>
   <nav><button data-view="chat" class="active">💬 Chat</button><button data-view="providers">🔌 Providers</button><button data-view="evaluation">📊 Evaluation</button></nav>
-  <div class="sidebar-foot"><div id="activePill" class="pill">No provider active</div><p class="warn" id="storageWarn">⚠ API keys in localStorage — prototype only, not production secure. Replace with backend credential store.</p></div></aside>
+  <div class="sidebar-foot"><div id="activePill" class="pill">No provider active</div><p class="warn" id="storageWarn">⚠ Server backend not detected. API keys are never stored in this browser.</p></div></aside>
  <main>
   <section id="view-chat" class="view active">
    <header class="topbar"><div><h1>Chat</h1><p id="chatSub">Select a provider — SAVAGE never switches providers or models automatically.</p></div>
@@ -23,10 +23,10 @@
   </section>
  </main>
 </div>
-<div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><h2 id="modalTitle">Add provider</h2>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-card"><h2 id="modalTitle">Add provider</h2>
  <form id="providerForm">
   <label>Name<input name="name" required></label><label>Adapter<select name="adapter"><option value="openai-compatible">OpenAI-compatible</option><option value="huggingface">Hugging Face</option><option value="venice">Venice AI</option><option value="custom-openai">Custom OpenAI-compatible</option></select></label>
-  <label>Endpoint URL<input name="endpoint" placeholder="https://api.example.com/v1"></label><label>API key <small id="apiKeyHint">stored via credential store</small><input name="apiKey" type="password" autocomplete="off"></label>
+  <label>Endpoint URL<input name="endpoint" placeholder="https://api.example.com/v1"></label><label>API key <small id="apiKeyHint">stored via credential store</small><input name="apiKey" type="password" autocomplete="off" aria-describedby="apiKeyHint"></label>
   <label>Model<input name="model" placeholder="model-id"></label><label>Custom headers (JSON, optional)<textarea name="customHeaders" rows="2" placeholder='{"X-Foo":"bar"}'></textarea></label>
   <label>Pricing $/1M tokens — input <input name="inPrice" type="number" step="any" min="0" placeholder="0"></label><label>output <input name="outPrice" type="number" step="any" min="0" placeholder="0"></label>
   <div class="modal-actions"><button type="button" class="btn ghost" id="cancelModal">Cancel</button><button class="btn primary">Save</button></div>

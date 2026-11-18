@@ -1,7 +1,9 @@
 import { createDefaultRegistry, BUILTIN_PROVIDERS } from './src/provider-registry.js';
 import { ChatService } from './src/chat-service.js';
 import { Telemetry } from './src/telemetry.js';
-import { LocalCredentialStore, BackendCredentialStore } from './src/secure-storage.js';
+import { BackendCredentialStore } from './src/secure-storage.js';
+import { SseParser } from './src/sse.js';
+import { RequestLifecycle } from './src/request-lifecycle.js';
 import { NormalizedError, CATEGORY_LABELS } from './src/errors.js';
 
 const $ = (s) => document.querySelector(s);
@@ -12,8 +14,8 @@ const LS_P = 'savage.providers', LS_A = 'savage.active';
 
 let providers = load();
 let activeId = localStorage.getItem(LS_A) || providers.find(p => p.enabled)?.id || null;
-let history = [], streaming = false, editingId = null, proxyMode = false, store = null;
-let activeAbort = null;
+let history = [], streaming = false, editingId = null, proxyMode = false, store = null, modalOpener = null;
+const lifecycle = new RequestLifecycle();
 const metrics = {};
 
 async function detectBackend() {
@@ -26,10 +28,18 @@ async function detectBackend() {
 }
 const health = await detectBackend();
 proxyMode = Boolean(health);
-store = proxyMode ? new BackendCredentialStore() : new LocalCredentialStore();
+// Fail closed: without the backend there is no credential store at all.
+// Provider keys are never written to this browser or localStorage.
+store = proxyMode ? new BackendCredentialStore() : null;
 
 function load() {
-  try { const parsed = JSON.parse(localStorage.getItem(LS_P) || 'null'); if (Array.isArray(parsed) && parsed.length) return parsed; } catch { /* ignore corrupt storage */ }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LS_P) || 'null');
+    if (Array.isArray(parsed) && parsed.length) {
+      // Older builds could have persisted keys/headers. Scrub them on load.
+      return parsed.map(({ apiKey, customHeaders, hasCredential, ...rest }) => ({ ...rest, hasCredential: false }));
+    }
+  } catch { /* ignore corrupt storage */ }
   return structuredClone(BUILTIN_PROVIDERS);
 }
 function save() {
@@ -38,7 +48,7 @@ function save() {
   try { localStorage.setItem(LS_P, JSON.stringify(safe)); localStorage.setItem(LS_A, activeId || ''); } catch { /* private mode */ }
 }
 const activeProvider = () => providers.find(p => p.id === activeId) || null;
-const authLabel = (p) => (p.hasCredential ? 'key stored' : proxyMode ? 'no key stored' : p.apiKey ? 'key set' : 'no key');
+const authLabel = (p) => (p.hasCredential ? 'key stored' : proxyMode ? 'no key stored' : 'server required for keys');
 
 function toast(message, isError = false) {
   const el = document.createElement('div');
@@ -74,28 +84,39 @@ async function proxyChat(provider, messages, options = {}) {
     if (!payload.ok) throw normalizedFrom(payload.error, res.status);
     return payload.result;
   }
+  if (!res.body) throw new NormalizedError({ category: 'connection_error', code: 'stream_unavailable', message: 'Streaming is not available in this browser.' });
   const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '', result = null, failure = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let index;
-    while ((index = buffer.indexOf('\n\n')) >= 0) {
-      const frame = buffer.slice(0, index);
-      buffer = buffer.slice(index + 2);
-      const line = frame.split('\n').find(l => l.startsWith('data:'));
-      if (!line) continue;
-      let event;
-      try { event = JSON.parse(line.slice(5).trim()); } catch { continue; }
-      if (event.type === 'token') options.onToken?.(event.text, event.full);
-      else if (event.type === 'done') result = event.result;
-      else if (event.type === 'error') failure = event.error;
+  const parser = new SseParser();
+  let result = null, failure = null, released = false;
+  // A Stop (or a provider switch) must cancel the body read, not just the fetch.
+  const release = async () => { if (released) return; released = true; try { await reader.cancel(); } catch { /* already closed */ } };
+  const onAbort = () => { void release(); };
+  options.signal?.addEventListener?.('abort', onAbort, { once: true });
+  const handle = (event) => {
+    if (event.type === 'done') return;
+    let payload;
+    try { payload = JSON.parse(event.data); } catch { return; } // keep-alive / partial frame
+    if (payload.type === 'token') options.onToken?.(payload.text, payload.full);
+    else if (payload.type === 'done') result = payload.result;
+    else if (payload.type === 'error') failure = payload.error;
+  };
+  try {
+    if (options.signal?.aborted) throw new NormalizedError({ category: 'timeout', code: 'user_cancelled', cancelled: true, message: 'Cancelled by you. Provider and model were kept as selected.' });
+    while (!parser.done) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const event of parser.feed(value)) handle(event);
     }
+    for (const event of parser.flush()) handle(event);
+  } catch (error) {
+    if (options.signal?.aborted) throw new NormalizedError({ category: 'timeout', code: 'user_cancelled', cancelled: true, message: 'Cancelled by you. Provider and model were kept as selected.' });
+    throw error instanceof NormalizedError ? error : normalizedFrom(error);
+  } finally {
+    options.signal?.removeEventListener?.('abort', onAbort);
+    await release();
   }
   if (failure) throw normalizedFrom(failure);
-  if (!result) throw new NormalizedError({ category: 'connection_error', message: 'Stream ended without a result.' });
+  if (!result) throw new NormalizedError({ category: 'connection_error', code: 'stream_incomplete', message: 'The stream ended before the server sent a result. Nothing was switched.' });
   return result;
 }
 async function runTest(provider) { return proxyMode ? proxyCall(provider, 'test') : service.test(provider); }
@@ -109,10 +130,8 @@ function recordClientTelemetry(result, provider, failed = null) {
 }
 
 async function hydrateCredentials() {
-  for (const p of providers) {
-    if (proxyMode) p.hasCredential = await store.has(p.id).catch(() => false);
-    else { p.apiKey = (await store.get(p.id).catch(() => '')) || ''; p.hasCredential = Boolean(p.apiKey); }
-  }
+  if (!proxyMode || !store) { providers.forEach(p => { delete p.apiKey; p.hasCredential = false; }); return; }
+  for (const p of providers) p.hasCredential = await store.has(p.id).catch(() => false);
 }
 
 function render() {
@@ -128,7 +147,7 @@ function render() {
     : 'No provider selected. Add or enable one — SAVAGE will not pick one for you.';
   $('#storageWarn').textContent = proxyMode
     ? '🔒 Credentials are held by the server vault and never sent to the browser. Development vault — add auth + KMS before production.'
-    : '⚠ Prototype mode: API keys are kept in this browser only. Run `node server.mjs` for encrypted server-side storage.';
+    : '⚠ Server backend not detected. API keys are never stored in this browser — run `node server.mjs` to configure providers securely.';
   $('#streamToggle').hidden = !(a && registry.get(a.adapter)?.supportsStreaming);
   renderProviders();
   renderEvaluation();
@@ -253,7 +272,7 @@ function showRemoveConfirm(p, menu) {
     event.stopPropagation();
     closeProviderMenu(true);
     providers = providers.filter(x => x.id !== p.id);
-    await store.delete(p.id).catch(() => {});
+    await store?.delete(p.id).catch(() => {});
     if (activeId === p.id) activeId = providers.find(x => x.enabled)?.id || providers[0]?.id || null;
     save(); render(); toast(`${p.name} removed`);
   });
@@ -317,31 +336,46 @@ function setPendingText(node, text) { const body = node.firstChild; if (body.tex
 async function sendChat(rawText) {
   const text = rawText.trim();
   if (!text) return;
+  if (lifecycle.active) return toast('A request is already running. Stop it first — SAVAGE will not queue or switch providers.', true);
   const provider = activeProvider();
   if (!provider || !provider.enabled) return toast('No active provider. Enable one — SAVAGE will not choose for you.', true);
-  if (proxyMode) { const ok = await store.has(provider.id).catch(() => false); provider.hasCredential = ok; }
+
   history.push({ role: 'user', content: text });
   addMessage('user', text);
+
+  const controller = new AbortController();
+  const request = lifecycle.begin(provider, { controller });
+  const snapshot = request.provider; // frozen: later model edits cannot relabel this response
   const sendButton = $('#sendBtn');
   const stopButton = $('#stopBtn');
-  const controller = new AbortController();
-  activeAbort = controller;
   stopButton.hidden = false; stopButton.disabled = false;
   sendButton.disabled = true; sendButton.textContent = 'Sending…';
   const pending = addMessage('assistant', streaming ? '' : 'Contacting provider…');
   try {
-    const result = await runChat(provider, history, { stream: streaming, signal: controller.signal, onToken: (delta, full) => setPendingText(pending, full) });
+    if (proxyMode && store) provider.hasCredential = await store.has(provider.id).catch(() => false);
+    const result = await runChat(provider, history, {
+      stream: streaming,
+      signal: controller.signal,
+      onToken: (delta, full) => {
+        // Late tokens from a cancelled or superseded request are ignored.
+        if (lifecycle.isCurrent(request) && !controller.signal.aborted) setPendingText(pending, full);
+      },
+    });
+    if (lifecycle.isStale(request)) { pending.remove(); return; }
     setPendingText(pending, result.responseText || '(empty response)');
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = `${result.model} · ${result.latencyMs}ms${result.usage?.totalTokens ? ` · ${result.usage.totalTokens} tokens` : ''}${result.cost != null ? ` · $${result.cost}` : ''}${result.streamed ? ' · streamed' : ''}${result.requestId ? ` · ${result.requestId}` : ''}`;
+    const model = result.model || snapshot.model;
+    const costLabel = result.cost == null ? '' : ` · $${result.cost}${result.costSource === 'estimated' ? ' (est.)' : result.costSource === 'reported' ? ' (reported)' : ''}`;
+    meta.textContent = `${model} · ${result.latencyMs}ms${result.usage?.totalTokens ? ` · ${result.usage.totalTokens} tokens` : ''}${costLabel}${result.streamed ? ' · streamed' : ''}${result.complete === false ? ' · incomplete' : ''}${result.requestId ? ` · ${result.requestId}` : ''}`;
     pending.append(meta);
     history.push({ role: 'assistant', content: result.responseText });
-    metrics[provider.id] = { latency: result.latencyMs, count: (metrics[provider.id]?.count || 0) + 1 };
-    recordClientTelemetry(result, provider);
+    metrics[snapshot.id] = { latency: result.latencyMs, count: (metrics[snapshot.id]?.count || 0) + 1 };
+    recordClientTelemetry(result, snapshot);
+    if (result.warning) toast(result.warning, true);
     renderProviders();
   } catch (error) {
-    if (controller.signal.aborted) {
+    if (controller.signal.aborted || lifecycle.isStale(request)) {
       pending.remove();
       addMessage('assistant', 'Stopped by you. Provider and model kept as selected — nothing was switched.');
       return;
@@ -354,9 +388,9 @@ async function sendChat(rawText) {
         ? () => { history.pop(); $('#chatInput').value = text; $('#chatForm').requestSubmit(); }
         : null,
     });
-    recordClientTelemetry(null, provider, normalized);
+    recordClientTelemetry(null, snapshot, normalized);
   } finally {
-    activeAbort = null;
+    lifecycle.finish(request);
     stopButton.hidden = true; stopButton.disabled = false;
     sendButton.disabled = false; sendButton.textContent = 'Send';
     stopButton.textContent = 'Stop';
@@ -397,6 +431,7 @@ function renderHealthChart(summary) {
 // ---------- Provider modal ----------
 function openModal(provider = null) {
   editingId = provider?.id || null;
+  modalOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   $('#modalTitle').textContent = provider ? 'Edit provider' : 'Add provider';
   const form = $('#providerForm');
   form.reset();
@@ -410,18 +445,38 @@ function openModal(provider = null) {
     form.elements.inPrice.value = provider.pricing?.inputPer1M ?? '';
     form.elements.outPrice.value = provider.pricing?.outputPer1M ?? '';
   }
+  form.elements.apiKey.disabled = !proxyMode;
+  form.elements.apiKey.setAttribute('aria-describedby', 'apiKeyHint');
   $('#apiKeyHint').textContent = proxyMode
     ? (provider?.hasCredential ? 'A key is already stored server-side. Leave blank to keep it.' : 'Stored encrypted server-side; never returned to the browser.')
-    : 'Prototype: stored in this browser only.';
+    : 'Server backend required. Keys are never stored in this browser.';
   $('#modal').classList.remove('hidden');
   form.elements.name.focus();
 }
-function closeModal() { $('#modal').classList.add('hidden'); editingId = null; }
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  editingId = null;
+  if (modalOpener?.isConnected) modalOpener.focus();
+  modalOpener = null;
+}
+function modalFocusable() {
+  return [...$('#modal').querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')]
+    .filter(el => !el.disabled && el.offsetParent !== null);
+}
+function trapModalFocus(event) {
+  if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
+  if (event.key !== 'Tab') return;
+  const items = modalFocusable();
+  if (!items.length) return;
+  const first = items[0], last = items.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
 
 $('#addProvider').addEventListener('click', () => openModal());
 $('#cancelModal').addEventListener('click', closeModal);
 $('#modal').addEventListener('click', (event) => { if (event.target.id === 'modal') closeModal(); });
-$('#modal').addEventListener('keydown', (event) => { if (event.key === 'Escape') closeModal(); });
+$('#modal').addEventListener('keydown', trapModalFocus);
 
 $('#providerForm').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -450,13 +505,11 @@ $('#providerForm').addEventListener('submit', async (event) => {
     activeId = provider.id;
   }
   try {
-    if (proxyMode) {
+    if (proxyMode && store) {
       await store.set(provider.id, { secret: key || undefined, headers: patched.customHeaders ? patched.customHeaders : undefined });
       provider.hasCredential = await store.has(provider.id);
     } else if (key) {
-      await store.set(provider.id, key);
-      provider.apiKey = key;
-      provider.hasCredential = true;
+      throw new Error('A server backend is required to store API keys. Start `node server.mjs` and reload — keys are never written to this browser.');
     }
     save(); closeModal(); render(); toast(`Provider saved: ${provider.name}`);
   } catch (error) {
@@ -465,8 +518,20 @@ $('#providerForm').addEventListener('submit', async (event) => {
 });
 
 // ---------- Navigation & controls ----------
-$('#providerSelect').addEventListener('change', (event) => { activeId = event.target.value; save(); render(); });
-$('#modelInput').addEventListener('change', (event) => { const provider = activeProvider(); if (!provider) return; provider.model = event.target.value.trim(); save(); render(); toast('Model updated for this provider'); });
+$('#providerSelect').addEventListener('change', (event) => {
+  const wasRunning = Boolean(lifecycle.active);
+  activeId = event.target.value;
+  save(); render();
+  if (wasRunning) toast('Provider changed. The running request keeps the provider and model it started with.');
+});
+$('#modelInput').addEventListener('change', (event) => {
+  const provider = activeProvider();
+  if (!provider) return;
+  const wasRunning = Boolean(lifecycle.active);
+  provider.model = event.target.value.trim();
+  save(); render();
+  toast(wasRunning ? 'Model changed. The running request keeps its original model.' : 'Model updated for this provider');
+});
 $('#streamToggle').addEventListener('click', (event) => {
   streaming = !streaming;
   event.currentTarget.textContent = `Streaming: ${streaming ? 'on' : 'off'}`;
@@ -479,7 +544,7 @@ document.querySelectorAll('nav button').forEach(button => button.addEventListene
   renderEvaluation();
 }));
 $('#clearTelemetry').addEventListener('click', () => { telemetry.clear(); renderEvaluation(); toast('Local telemetry cleared'); });
-$('#stopBtn').addEventListener('click', () => { const button = $('#stopBtn'); button.disabled = true; button.textContent = 'Stopping…'; activeAbort?.abort(); });
+$('#stopBtn').addEventListener('click', () => { const button = $('#stopBtn'); button.disabled = true; button.textContent = 'Stopping…'; lifecycle.abort(); });
 $('#chatForm').addEventListener('submit', (event) => { event.preventDefault(); const input = $('#chatInput'); const text = input.value; input.value = ''; sendChat(text); });
 $('#chatInput').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chatForm').requestSubmit(); }

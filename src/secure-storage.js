@@ -1,6 +1,9 @@
-// Secure-storage abstraction.
-// Production: credentials live server-side, encrypted at rest (KMS envelope
-// encryption + encrypted DB). The browser must never receive provider keys.
+// Credential storage abstraction.
+//
+// There is deliberately no browser-side store any more. Provider keys and
+// custom auth headers live in the server vault; the browser only ever learns
+// `{ configured: boolean }`. If the backend is unavailable the UI fails closed
+// and asks for the server instead of falling back to localStorage.
 export class CredentialStore {
   async get() { throw new Error('Not implemented'); }
   async has() { throw new Error('Not implemented'); }
@@ -8,17 +11,6 @@ export class CredentialStore {
   async delete() { throw new Error('Not implemented'); }
 }
 
-// PROTOTYPE ONLY. Keys in localStorage are readable by any script on the origin.
-export class LocalCredentialStore extends CredentialStore {
-  constructor(storage = globalThis.localStorage) { super(); this.storage = storage; this.insecure = true; this.kind = 'local-dev'; }
-  async get(id) { try { return this.storage?.getItem(`savage.key.${id}`) || ''; } catch { return ''; } }
-  async has(id) { return Boolean(await this.get(id)); }
-  async set(id, value) { this.storage?.setItem(`savage.key.${id}`, typeof value === 'string' ? value : value?.secret || ''); }
-  async delete(id) { this.storage?.removeItem(`savage.key.${id}`); }
-}
-
-// Backend store: talks to the server vault. The API never returns secret material,
-// so get() intentionally resolves to '' — `has()` is what the UI should use.
 export class BackendCredentialStore extends CredentialStore {
   constructor(baseUrl = '/api/credentials', fetchImpl = globalThis.fetch) {
     super(); this.baseUrl = String(baseUrl).replace(/\/+$/, ''); this.fetchImpl = fetchImpl; this.insecure = false; this.kind = 'backend';
@@ -39,8 +31,4 @@ export class BackendCredentialStore extends CredentialStore {
     await this.#call('PUT', id, payload);
   }
   async delete(id) { await this.#call('DELETE', id); }
-}
-
-export function createCredentialStore({ backendEndpoint } = {}) {
-  return backendEndpoint ? new BackendCredentialStore(backendEndpoint) : new LocalCredentialStore();
 }

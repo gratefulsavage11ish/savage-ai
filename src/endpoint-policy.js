@@ -1,7 +1,7 @@
 import { NormalizedError } from './errors.js';
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
-const LOOPBACK_ALLOWLIST = ['localhost', '127.0.0.1'];
+const LOOPBACK_ALLOWLIST = ['localhost', '127.0.0.1', '::1'];
 
 // Allowlisting per adapter. Providers you add must be explicitly allowlisted
 // here or via SAVAGE_ALLOWED_HOSTS — arbitrary proxy URLs are refused.
@@ -13,13 +13,18 @@ export const ADAPTER_HOST_ALLOWLIST = {
 };
 
 export function isPrivateAddress(ip) {
-  const value = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (value === '::1' || value === '::') return true;
-  if (/^(fc|fd|fe80)/.test(value)) return true; // unique-local / link-local v6
-  if (value.startsWith('::ffff:')) return isPrivateAddress(value.slice(7));
+  let value = String(ip || '').toLowerCase().trim().replace(/^\[|\]$/g, '');
+  const zone = value.indexOf('%');
+  if (zone >= 0) value = value.slice(0, zone); // IPv6 zone id: fe80::1%eth0
+  if (!value) return false;
+  return value.includes(':') ? isPrivateIpv6(value) : isPrivateIpv4(value);
+}
+
+function isPrivateIpv4(value) {
   const v4 = value.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!v4) return false;
   const [a, b] = v4.slice(1).map(Number);
+  if (a > 255 || b > 255) return false;
   if (a === 10 || a === 127 || a === 0) return true;
   if (a === 169 && b === 254) return true; // metadata / link-local
   if (a === 172 && b >= 16 && b <= 31) return true;
@@ -28,9 +33,32 @@ export function isPrivateAddress(ip) {
   return false;
 }
 
+const hextetsToIpv4 = (hiHex, loHex) => {
+  const hi = parseInt(hiHex, 16); const lo = parseInt(loHex, 16);
+  return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+};
+
+function isPrivateIpv6(value) {
+  if (value === '::1' || value === '::') return true;
+  // IPv4-mapped (dotted and hex forms) and IPv4-compatible.
+  const mappedDotted = value.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mappedDotted) return isPrivateIpv4(mappedDotted[1]);
+  const mappedHex = value.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) return isPrivateIpv4(hextetsToIpv4(mappedHex[1], mappedHex[2]));
+  const compatible = value.match(/^::(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (compatible) return isPrivateIpv4(compatible[1]);
+  if (/^f[cd][0-9a-f]{2}:/.test(value)) return true; // fc00::/7 unique local
+  if (/^fe[89ab][0-9a-f]:/.test(value)) return true; // fe80::/10 link local
+  const sixToFour = value.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/);
+  if (sixToFour) return isPrivateIpv4(hextetsToIpv4(sixToFour[1], sixToFour[2]));
+  return false;
+}
+
 export function hostAllowed(hostname, { adapter, allowedHosts = [] } = {}) {
   const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  const list = [...(ADAPTER_HOST_ALLOWLIST[adapter] || []), ...allowedHosts.map(h => String(h).toLowerCase())];
+  const list = [...(ADAPTER_HOST_ALLOWLIST[adapter] || []), ...allowedHosts.map(h => String(h).toLowerCase().replace(/^\./, ''))];
+  // Suffix matches must sit on a label boundary: example.com must not allow
+  // notexample.com or example.com.attacker.net.
   return list.some(entry => entry && (host === entry || host.endsWith(`.${entry}`)));
 }
 
@@ -52,6 +80,10 @@ export function assertEndpointUrl(endpoint, { adapter, allowedHosts = [], allowL
   return url;
 }
 
+// DNS rebinding remains a documented limitation: this resolves the hostname, but
+// the outbound connection resolves it again. Dependency-free Node cannot pin the
+// address for fetch without a custom dispatcher, so production deployments must
+// pin addresses or egress through an enforcing proxy.
 export async function assertEndpointResolvesSafely(url, { lookup, allowLoopback = false } = {}) {
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (LOOPBACK_HOSTS.has(host)) {

@@ -23,9 +23,17 @@ ProviderRegistry
 Shared pieces:
 
 - `src/http.js` — timed fetch (`AbortController`), usage/cost normalization, `successResult`.
+- `src/sse.js` — shared SSE parser: chunk boundaries, CRLF/CR/LF, multiline `data:`, UTF-8 split
+  across chunks, `[DONE]` and trailing bytes.
+- `src/request-lifecycle.js` — one in-flight request at a time, with a frozen provider snapshot so
+  late tokens and provider/model switches cannot relabel a response or misattribute telemetry.
 - `src/errors.js` — `NormalizedError` with categories `provider_refusal`, `authentication_error`,
   `invalid_request`, `rate_limit`, `connection_error`, `timeout`, `server_error`,
-  `model_unavailable`, `unknown_error`.
+  `model_unavailable`, `unknown_error`. Status mapping is explicit: 402 → `rate_limit`
+  (`payment_required`, not retryable), 413/415 → `invalid_request`, 451 → `provider_refusal`,
+  404 → `model_unavailable` unless the body names a missing endpoint, malformed or empty 200s →
+  `server_error`, other 4xx → `invalid_request`. Refusal detection only reads provider
+  error/refusal fields, never assistant text.
 - `src/chat-service.js` — dispatches to **exactly one** adapter and re-throws normalized errors.
   It never retries and never switches provider/model.
 - `src/endpoint-policy.js` — host allowlisting, loopback gating, private/link-local IP rejection.
@@ -38,8 +46,11 @@ Normalized success result:
 { ok: true, providerId, model, responseText, usage, latencyMs, cost, requestId }
 ```
 
-Cost is computed from reported usage and the per-provider pricing you configure
-(`inputPer1M` / `outputPer1M`, USD per 1M tokens). It is `null` when the provider reports no usage.
+Usage keeps input/output/total, cached and reasoning tokens, and preserves unknown scalar fields.
+`null` (not reported) and `0` (reported as zero) are distinct. Cost prefers a provider-reported
+cost and otherwise estimates from usage plus the per-provider pricing you configure
+(`inputPer1M` / `outputPer1M`, USD per 1M tokens); `costSource` is `reported`, `estimated`, or
+`null`, and a missing side of the usage never produces a confident cost.
 
 ## Run
 
@@ -80,28 +91,34 @@ Proxy requests carry provider metadata (`id`, `adapter`, `endpoint`, `model`, `p
 the server has no fallback path. Cross-origin mutations are refused (Origin/Sec-Fetch-Site),
 bodies must be `application/json`, and requests are rate limited per IP.
 
-Chat requests can be cancelled with the Stop control; cancelling aborts the browser request and the
-upstream provider call on the server. The Evaluation view includes a per-provider health chart built
-from real request outcomes, latency and refusal telemetry.
+Chat requests can be cancelled with the Stop control; cancelling aborts the browser request, the
+server's upstream call, and the stream reader. Cancellation is reported distinctly from a request
+timeout and from an idle-stream timeout, and late tokens from a cancelled or superseded request are
+discarded. A stream that ends without `[DONE]` but with content is returned as `complete: false`
+with a warning instead of being presented as a clean finish. The Evaluation view includes a
+per-provider health chart built from real request outcomes, latency and refusal telemetry.
 
 Provider metadata (name, endpoint, model, pricing) is stored in `localStorage`; keys and
-custom headers are not. In server mode the browser uses `BackendCredentialStore` and never
-receives secret material. In prototype mode (`file://` or a plain static server) the client
-falls back to `LocalCredentialStore`, which is explicitly marked insecure.
+custom headers are not. The browser uses `BackendCredentialStore` and never receives secret
+material. There is no browser credential fallback: if `/api/health` is unavailable the UI fails
+closed, disables key entry and asks for the server instead of writing keys to storage.
 
 ## Tests
 
 ```sh
-npm test        # 39 tests, no network or real keys required
+npm test        # 89 tests, no network or real keys required
 npm run check   # syntax checks + the same tests
 ```
 
 Covers provider registration, adapter selection, OpenAI-compatible/HF/Venice/custom requests,
-streaming token parsing, model discovery, every error category, timeouts, connection failures,
-refusals, credential encryption at rest (ciphertext contains no plaintext), credential endpoints,
-CSRF/JSON enforcement, proxy chat/models/test, SSE streaming through the proxy, cost and usage
-telemetry, SSRF/allowlist/loopback rejection, Authorization override protection, static file
-exposure, and no-silent-fallback at both the service and proxy layers.
+SSE parsing (chunking, CRLF, multiline data, split UTF-8, `[DONE]`, no-`[DONE]` policy), model
+discovery, every error category including 402/413/415/451 and endpoint-vs-model 404s, malformed
+and empty responses, refusal fields, cancellation versus timeout, header sanitization, usage/cost
+normalization, credential encryption at rest (ciphertext contains no plaintext), corrupt/truncated
+vaults, wrong keys, concurrent and failed atomic writes, file permissions, credential endpoints,
+CSRF/JSON enforcement, proxy chat/models/test, client-disconnect abort propagation, streaming
+through the proxy, SSRF/IPv6/allowlist/loopback rejection, static file exposure, and
+no-silent-fallback at both the service and proxy layers.
 
 ## Add a provider adapter
 
@@ -124,9 +141,10 @@ adapter `<select>` in `index.html`. No application rebuild or registry changes e
    is not auth), audit retention/alerts, and key rotation.
 3. Keep API keys server-side only and ideally proxy every provider call — never send secrets to
    the browser.
-4. SSRF: host allowlisting, private-IP rejection and `redirect: 'manual'` (redirects are refused)
-   are in place, but DNS resolution and the later request are separate steps (rebinding TOCTOU).
-   For production, pin resolved addresses and egress through a proxy/firewall.
+4. SSRF: host allowlisting, private-IP rejection (including IPv4-mapped IPv6, zone ids and 6to4)
+   and `redirect: 'manual'` are in place, but the DNS check and the later connection are separate
+   steps. Dependency-free Node cannot pin the address for `fetch`, so **DNS rebinding is not
+   solved** — production must pin resolved addresses or egress through an enforcing proxy/firewall.
 5. Configure real provider credentials: Hugging Face token (`openai/gpt-oss-120b` via the router),
    Venice key, and an OpenAI-compatible endpoint. Add that endpoint's host to
    `SAVAGE_ALLOWED_HOSTS` — `openai-compatible` has no default host allowlist by design.
